@@ -7,14 +7,21 @@ from io import BytesIO, StringIO
 from contextlib import asynccontextmanager
 from fastapi.responses import Response
 
-MODEL_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models//xgb_model.pkl"
+MODEL_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model.pkl"
+
+model = None  # Initialize model globally
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global model
-    response = requests.get(MODEL_URL)
-    response.raise_for_status()
-    model = joblib.load(BytesIO(response.content))
+    try:
+        response = requests.get(MODEL_URL)
+        response.raise_for_status()
+        model = joblib.load(BytesIO(response.content))
+        print("✅ Model loaded successfully!")
+    except Exception as e:
+        print(f"❌ Failed to load model: {str(e)}")
+        model = None  # Still allow app to run
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -28,10 +35,13 @@ def root():
 
 @app.get("/favicon.ico")
 async def favicon():
-    return Response(status_code=204)  # Prevents 404 error for favicon
+    return Response(status_code=204)
 
 @app.post("/predict")
 def predict_from_file(data: FileURLInput):
+    if model is None:
+        return {"error": "Model not loaded. Please try again later."}
+
     try:
         response = requests.get(data.file_url)
         response.raise_for_status()
@@ -76,3 +86,5 @@ def predict_from_file(data: FileURLInput):
         return {"error": f"Request failed: {str(e)}"}
     except Exception as e:
         return {"error": f"An error occurred: {str(e)}"}
+
+         
