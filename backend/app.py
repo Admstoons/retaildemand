@@ -1,11 +1,13 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import joblib
 import pandas as pd
 import requests
-from io import BytesIO, StringIO
+from io import StringIO
 from contextlib import asynccontextmanager
 from fastapi.responses import Response
+from sklearn.preprocessing import LabelEncoder
+from io import BytesIO
 
 MODEL_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model.pkl"
 
@@ -21,7 +23,7 @@ async def lifespan(app: FastAPI):
         print("✅ Model loaded successfully!")
     except Exception as e:
         print(f"❌ Failed to load model: {str(e)}")
-        model = None  # Still allow app to run
+        model = None  # Allow app to run without crashing
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -40,51 +42,103 @@ async def favicon():
 @app.post("/predict")
 def predict_from_file(data: FileURLInput):
     if model is None:
-        return {"error": "Model not loaded. Please try again later."}
+        raise HTTPException(status_code=503, detail="Model not loaded. Please try again later.")
 
     try:
+        # Fetch the CSV file
         response = requests.get(data.file_url)
         response.raise_for_status()
         df = pd.read_csv(StringIO(response.text))
 
         if df.empty:
-            return {"error": "Downloaded CSV is empty"}
+            raise HTTPException(status_code=400, detail="Downloaded CSV is empty")
 
-        required_columns = ['Holiday_Flag', 'Date', 'Weekly_Sales', 'Temperature', 'Fuel_Price', 'CPI', 'Unemployment']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            return {"error": f"Missing columns in the input CSV: {', '.join(missing_columns)}"}
+        # === Start of Preprocessing ===
 
-        # Process 'Date' column
+        # List of required columns for prediction (match the columns the model expects)
+        required_columns = [
+            'Store', 'Holiday_Flag', 'Temperature', 'Fuel_Price', 
+            'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday', 'Date', 'Weekly_Sales'
+        ]
+        
+        # Handle missing columns by adding them with default values (like 0 or the mean of the column)
+        for col in required_columns:
+            if col not in df.columns:
+                print(f"Warning: Missing column {col}. Filling with default values.")
+                # Default values or mean of the column (if numeric)
+                if col in ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment']:
+                    df[col] = 0  # Fill with 0 for numeric columns
+                else:
+                    df[col] = 'Unknown'  # Fill with 'Unknown' for categorical columns like 'Store'
+
+        # Remove any extra columns that might have been included in the data
+        extra_columns = [col for col in df.columns if col not in required_columns]
+        df.drop(columns=extra_columns, inplace=True)
+
+        # Process 'Date' column only if it exists
         if 'Date' in df.columns:
-            try:
-                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-                df['Year'] = df['Date'].dt.year
-                df['Month'] = df['Date'].dt.month
-                df['Day'] = df['Date'].dt.day
-                df['Weekday'] = df['Date'].dt.weekday
-                df.drop(columns=['Date'], inplace=True)
-            except Exception as e:
-                return {"error": f"Date processing failed: {str(e)}"}
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            df['Year'] = df['Date'].dt.year
+            df['Month'] = df['Date'].dt.month
+            df['Day'] = df['Date'].dt.day
+            df['Weekday'] = df['Date'].dt.weekday
+            df.drop(columns=['Date'], inplace=True)
+        else:
+            # If 'Date' column is missing, create a default column for dates (e.g., range of integers)
+            df['Year'] = 2025  # Default year, can be adjusted
+            df['Month'] = 1  # Default month
+            df['Day'] = 1  # Default day
+            df['Weekday'] = 0  # Default to Monday (0)
 
-        # Drop target column if present
+        # Convert Year, Month, Day, and Weekday to numeric types (ensure they're integers)
+        for col in ['Year', 'Month', 'Day', 'Weekday']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+
+        # Label Encode certain columns (e.g., 'Store')
+        encoder = LabelEncoder()
+        for col in ['Store', 'Holiday_Flag']:
+            if col in df.columns:
+                df[col] = encoder.fit_transform(df[col].astype(str))
+
+        # Fill missing values with 0 or appropriate default
+        df.fillna(0, inplace=True)
+
+        # Drop target column 'Weekly_Sales' if present
         if 'Weekly_Sales' in df.columns:
+            actual_values = df['Weekly_Sales']
             df.drop(columns=['Weekly_Sales'], inplace=True)
-
-        # Drop non-numeric columns
-        non_numeric = df.select_dtypes(exclude=['int', 'float', 'bool']).columns
-        df.drop(columns=non_numeric, inplace=True)
+        else:
+            actual_values = [0] * len(df)  # Default to 0 if 'Weekly_Sales' is missing
 
         if df.empty:
-            return {"error": "No numeric data left for prediction after preprocessing."}
+            raise HTTPException(status_code=400, detail="No data left for prediction after preprocessing.")
 
-        # Make prediction
+        # === End of Preprocessing ===
+
+        # Make predictions
         predictions = model.predict(df)
-        return {"predictions": predictions.tolist()}
+
+        # Calculate errors (absolute difference between actual and predicted)
+        errors = abs(actual_values - predictions)
+
+        # Prepare final response with Dates, Actual Values, Predictions, and Errors
+        response_data = {
+            "dates": df['Year'].astype(str) + '-' + df['Month'].astype(str) + '-' + df['Day'].astype(str),
+            "actual_values": actual_values.tolist(),
+            "predictions": predictions.tolist(),
+            "errors": errors.tolist()
+        }
+
+        return response_data
 
     except requests.exceptions.RequestException as e:
-        return {"error": f"Request failed: {str(e)}"}
+        raise HTTPException(status_code=400, detail=f"Request failed: {str(e)}")
     except Exception as e:
-        return {"error": f"An error occurred: {str(e)}"}
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-         
+
+
+
+
+
