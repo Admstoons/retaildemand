@@ -1,17 +1,16 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
+from fastapi.responses import Response
 import joblib
 import pandas as pd
 import requests
-from io import StringIO
-from contextlib import asynccontextmanager
-from fastapi.responses import Response
+from io import StringIO, BytesIO
 from sklearn.preprocessing import LabelEncoder
-from io import BytesIO
 
 MODEL_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model.pkl"
 
-model = None  # Initialize model globally
+model = None  # Global model
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,10 +19,10 @@ async def lifespan(app: FastAPI):
         response = requests.get(MODEL_URL)
         response.raise_for_status()
         model = joblib.load(BytesIO(response.content))
-        print("✅ Model loaded successfully!")
+        print("✅ Model loaded successfully")
     except Exception as e:
-        print(f"❌ Failed to load model: {str(e)}")
-        model = None  # Allow app to run without crashing
+        print(f"❌ Model load failed: {e}")
+        model = None
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -42,103 +41,87 @@ async def favicon():
 @app.post("/predict")
 def predict_from_file(data: FileURLInput):
     if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded. Please try again later.")
+        raise HTTPException(status_code=503, detail="Model not loaded")
 
     try:
-        # Fetch the CSV file
+        # Download CSV file
         response = requests.get(data.file_url)
         response.raise_for_status()
         df = pd.read_csv(StringIO(response.text))
 
         if df.empty:
-            raise HTTPException(status_code=400, detail="Downloaded CSV is empty")
+            raise HTTPException(status_code=400, detail="CSV is empty")
 
-        # === Start of Preprocessing ===
-
-        # List of required columns for prediction (match the columns the model expects)
+        # Required columns
         required_columns = [
             'Store', 'Holiday_Flag', 'Temperature', 'Fuel_Price', 
-            'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday', 'Date', 'Weekly_Sales'
+            'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday', 
+            'Date', 'Weekly_Sales'
         ]
-        
-        # Handle missing columns by adding them with default values (like 0 or the mean of the column)
+
         for col in required_columns:
             if col not in df.columns:
-                print(f"Warning: Missing column {col}. Filling with default values.")
-                # Default values or mean of the column (if numeric)
                 if col in ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment']:
-                    df[col] = 0  # Fill with 0 for numeric columns
+                    df[col] = 0
                 else:
-                    df[col] = 'Unknown'  # Fill with 'Unknown' for categorical columns like 'Store'
+                    df[col] = 'Unknown'
 
-        # Remove any extra columns that might have been included in the data
-        extra_columns = [col for col in df.columns if col not in required_columns]
-        df.drop(columns=extra_columns, inplace=True)
+        # Drop extras
+        df = df[required_columns]
 
-        # Process 'Date' column only if it exists
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-            df['Year'] = df['Date'].dt.year
-            df['Month'] = df['Date'].dt.month
-            df['Day'] = df['Date'].dt.day
-            df['Weekday'] = df['Date'].dt.weekday
-            df.drop(columns=['Date'], inplace=True)
-        else:
-            # If 'Date' column is missing, create a default column for dates (e.g., range of integers)
-            df['Year'] = 2025  # Default year, can be adjusted
-            df['Month'] = 1  # Default month
-            df['Day'] = 1  # Default day
-            df['Weekday'] = 0  # Default to Monday (0)
+        # Date handling
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df['Year'] = df['Date'].dt.year.fillna(2025).astype(int)
+        df['Month'] = df['Date'].dt.month.fillna(1).astype(int)
+        df['Day'] = df['Date'].dt.day.fillna(1).astype(int)
+        df['Weekday'] = df['Date'].dt.weekday.fillna(0).astype(int)
 
-        # Convert Year, Month, Day, and Weekday to numeric types (ensure they're integers)
-        for col in ['Year', 'Month', 'Day', 'Weekday']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+        # Date strings
+        df['DateStr'] = df['Year'].astype(str) + '-' + df['Month'].astype(str) + '-' + df['Day'].astype(str)
 
-        # Label Encode certain columns (e.g., 'Store')
+        # Label encode
         encoder = LabelEncoder()
-        for col in ['Store', 'Holiday_Flag']:
-            if col in df.columns:
-                df[col] = encoder.fit_transform(df[col].astype(str))
+        df['Store'] = encoder.fit_transform(df['Store'].astype(str))
+        df['Holiday_Flag'] = encoder.fit_transform(df['Holiday_Flag'].astype(str))
 
-        # Fill missing values with 0 or appropriate default
+        # Target column
+        if 'Weekly_Sales' in df.columns:
+            actual_values = df['Weekly_Sales'].astype(float)
+            df.drop(columns=['Weekly_Sales', 'Date', 'DateStr'], inplace=True)
+        else:
+            actual_values = [0.0] * len(df)
+            df.drop(columns=['Date', 'DateStr'], inplace=True)
+
         df.fillna(0, inplace=True)
 
-        # Drop target column 'Weekly_Sales' if present
-        if 'Weekly_Sales' in df.columns:
-            actual_values = df['Weekly_Sales']
-            df.drop(columns=['Weekly_Sales'], inplace=True)
-        else:
-            actual_values = [0] * len(df)  # Default to 0 if 'Weekly_Sales' is missing
-
         if df.empty:
-            raise HTTPException(status_code=400, detail="No data left for prediction after preprocessing.")
+            raise HTTPException(status_code=400, detail="No valid rows for prediction")
 
-        # === End of Preprocessing ===
-
-        # Make predictions
+        # Predict
         predictions = model.predict(df)
 
-        # Calculate errors (absolute difference between actual and predicted)
-        errors = abs(actual_values - predictions)
-
-        # Prepare final response with Dates, Actual Values, Predictions, and Errors
-        response_data = {
-            "dates": df['Year'].astype(str) + '-' + df['Month'].astype(str) + '-' + df['Day'].astype(str),
-            "actual_values": actual_values.tolist(),
-            "predictions": predictions.tolist(),
-            "errors": errors.tolist()
+        # Build clean response with valid dates
+        results = {
+            "actual_values": [],
+            "predicted_values": [],
+            "dates": {}
         }
 
-        return response_data
+        valid_index = 0
+        for i in range(len(predictions)):
+            date_str = f"{df['Year'].iloc[i]}-{df['Month'].iloc[i]}-{df['Day'].iloc[i]}"
+            if date_str != "0-0-0":
+                results["actual_values"].append(float(actual_values[i]))
+                results["predicted_values"].append(float(predictions[i]))
+                results["dates"][str(valid_index)] = date_str
+                valid_index += 1
+
+        if not results["actual_values"]:
+            raise HTTPException(status_code=204, detail="No valid data points found")
+
+        return results
 
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=400, detail=f"Request failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Request error: {e}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-
-
-
-
-
+        raise HTTPException(status_code=500, detail=f"Server error: {e}")
