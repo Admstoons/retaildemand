@@ -9,7 +9,6 @@ from io import StringIO, BytesIO
 from sklearn.preprocessing import LabelEncoder
 
 MODEL_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model.pkl"
-
 model = None  # Global model
 
 @asynccontextmanager
@@ -54,8 +53,8 @@ def predict_from_file(data: FileURLInput):
 
         # Required columns
         required_columns = [
-            'Store', 'Holiday_Flag', 'Temperature', 'Fuel_Price', 
-            'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday', 
+            'Store', 'Holiday_Flag', 'Temperature', 'Fuel_Price',
+            'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday',
             'Date', 'Weekly_Sales'
         ]
 
@@ -66,31 +65,32 @@ def predict_from_file(data: FileURLInput):
                 else:
                     df[col] = 'Unknown'
 
-        # Drop extras
-        df = df[required_columns]
-
-        # Date handling
+        # Handle dates safely
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df['Year'] = df['Date'].dt.year.fillna(2025).astype(int)
         df['Month'] = df['Date'].dt.month.fillna(1).astype(int)
         df['Day'] = df['Date'].dt.day.fillna(1).astype(int)
         df['Weekday'] = df['Date'].dt.weekday.fillna(0).astype(int)
 
-        # Date strings
-        df['DateStr'] = df['Year'].astype(str) + '-' + df['Month'].astype(str) + '-' + df['Day'].astype(str)
+        # Construct formatted date before dropping columns
+        df['FormattedDate'] = df['Date'].dt.strftime('%Y-%m-%d').fillna('2025-01-01')
 
-        # Label encode
+        # Encode categorical fields
         encoder = LabelEncoder()
         df['Store'] = encoder.fit_transform(df['Store'].astype(str))
         df['Holiday_Flag'] = encoder.fit_transform(df['Holiday_Flag'].astype(str))
 
-        # Target column
+        # Extract target values before dropping
         if 'Weekly_Sales' in df.columns:
-            actual_values = df['Weekly_Sales'].astype(float)
-            df.drop(columns=['Weekly_Sales', 'Date', 'DateStr'], inplace=True)
+            actual_values = df['Weekly_Sales'].astype(float).tolist()
         else:
             actual_values = [0.0] * len(df)
-            df.drop(columns=['Date', 'DateStr'], inplace=True)
+
+        # Save formatted dates
+        formatted_dates = df['FormattedDate'].tolist()
+
+        # Drop non-feature columns
+        df.drop(columns=['Weekly_Sales', 'Date', 'DateStr', 'FormattedDate'], errors='ignore', inplace=True)
 
         df.fillna(0, inplace=True)
 
@@ -100,24 +100,20 @@ def predict_from_file(data: FileURLInput):
         # Predict
         predictions = model.predict(df)
 
-        # Build clean response with valid dates
+        # Package result
         results = {
             "actual_values": [],
             "predicted_values": [],
             "dates": {}
         }
 
-        valid_index = 0
         for i in range(len(predictions)):
-            date_str = f"{df['Year'].iloc[i]}-{df['Month'].iloc[i]}-{df['Day'].iloc[i]}"
-            if date_str != "0-0-0":
-                results["actual_values"].append(float(actual_values[i]))
-                results["predicted_values"].append(float(predictions[i]))
-                results["dates"][str(valid_index)] = date_str
-                valid_index += 1
+            results["actual_values"].append(float(actual_values[i]))
+            results["predicted_values"].append(float(predictions[i]))
+            results["dates"][str(i)] = formatted_dates[i]
 
-        if not results["actual_values"]:
-            raise HTTPException(status_code=204, detail="No valid data points found")
+        if not results["actual_values"] or not results["predicted_values"]:
+            raise HTTPException(status_code=204, detail="No valid predictions generated")
 
         return results
 
