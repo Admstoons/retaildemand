@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware  # ✅ CORS import
 import joblib
 import pandas as pd
 import requests
@@ -25,6 +26,22 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
+
+# ✅ CORS middleware setup
+origins = [
+    "http://localhost:5000",
+    "http://127.0.0.1:5000",
+    "https://your-flutter-web-url.web.app",  # 🔁 Replace with your real domain
+    "*",  # ⚠️ Allow all for dev testing, remove in production
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class FileURLInput(BaseModel):
     file_url: str
@@ -51,7 +68,6 @@ def predict_from_file(data: FileURLInput):
         if df.empty:
             raise HTTPException(status_code=400, detail="CSV is empty")
 
-        # Required columns
         required_columns = [
             'Store', 'Holiday_Flag', 'Temperature', 'Fuel_Price',
             'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday',
@@ -65,42 +81,33 @@ def predict_from_file(data: FileURLInput):
                 else:
                     df[col] = 'Unknown'
 
-        # Handle dates safely
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df['Year'] = df['Date'].dt.year.fillna(2025).astype(int)
         df['Month'] = df['Date'].dt.month.fillna(1).astype(int)
         df['Day'] = df['Date'].dt.day.fillna(1).astype(int)
         df['Weekday'] = df['Date'].dt.weekday.fillna(0).astype(int)
 
-        # Construct formatted date before dropping columns
         df['FormattedDate'] = df['Date'].dt.strftime('%Y-%m-%d').fillna('2025-01-01')
 
-        # Encode categorical fields
         encoder = LabelEncoder()
         df['Store'] = encoder.fit_transform(df['Store'].astype(str))
         df['Holiday_Flag'] = encoder.fit_transform(df['Holiday_Flag'].astype(str))
 
-        # Extract target values before dropping
         if 'Weekly_Sales' in df.columns:
             actual_values = df['Weekly_Sales'].astype(float).tolist()
         else:
             actual_values = [0.0] * len(df)
 
-        # Save formatted dates
         formatted_dates = df['FormattedDate'].tolist()
 
-        # Drop non-feature columns
         df.drop(columns=['Weekly_Sales', 'Date', 'DateStr', 'FormattedDate'], errors='ignore', inplace=True)
-
         df.fillna(0, inplace=True)
 
         if df.empty:
             raise HTTPException(status_code=400, detail="No valid rows for prediction")
 
-        # Predict
         predictions = model.predict(df)
 
-        # Package result
         results = {
             "actual_values": [],
             "predicted_values": [],
