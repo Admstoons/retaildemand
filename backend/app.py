@@ -9,12 +9,7 @@ import requests
 from io import StringIO, BytesIO
 import numpy as np
 
-MODEL_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model.pkl"
-ENCODERS_URLS = {
-    "Store": "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/store_encoder.pkl",
-    "Source": "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/source_encoder.pkl",
-    "Holiday_Flag": "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/holiday_encoder.pkl",
-}
+MODEL_AND_ENCODERS_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model.pkl"
 
 model = None
 encoders = {}
@@ -23,19 +18,12 @@ encoders = {}
 async def lifespan(app: FastAPI):
     global model, encoders
     try:
-        # Load model
-        response = requests.get(MODEL_URL)
+        response = requests.get(MODEL_AND_ENCODERS_URL)
         response.raise_for_status()
-        model = joblib.load(BytesIO(response.content))
-        print("✅ Model loaded successfully")
-
-        # Load encoders
-        for col, url in ENCODERS_URLS.items():
-            resp = requests.get(url)
-            resp.raise_for_status()
-            encoders[col] = joblib.load(BytesIO(resp.content))
-        print("✅ Encoders loaded successfully")
-
+        data = joblib.load(BytesIO(response.content))
+        model = data['model']
+        encoders = data['encoders']
+        print("✅ Model and encoders loaded successfully")
     except Exception as e:
         print(f"❌ Loading failed: {e}")
         model = None
@@ -46,7 +34,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins or adjust as needed
+    allow_origins=["*"],  # Allow all origins or restrict as needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,7 +57,6 @@ def predict_from_file(data: FileURLInput):
         raise HTTPException(status_code=503, detail="Model or encoders not loaded")
 
     try:
-        # Download CSV file from provided URL
         response = requests.get(data.file_url)
         response.raise_for_status()
         df = pd.read_csv(StringIO(response.text))
@@ -77,7 +64,7 @@ def predict_from_file(data: FileURLInput):
         if df.empty:
             raise HTTPException(status_code=400, detail="CSV is empty")
 
-        # Ensure all required columns exist, fill missing numeric with 0, categorical with 'Unknown'
+        # Required columns, fill missing numeric with 0, categorical with 'Unknown'
         required_columns = [
             'Store', 'Source', 'Holiday_Flag', 'Temperature', 'Fuel_Price',
             'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday',
@@ -90,10 +77,7 @@ def predict_from_file(data: FileURLInput):
                 else:
                     df[col] = 'Unknown'
 
-        # Parse date (must match training format)
         df['Date'] = pd.to_datetime(df['Date'], format="%d-%m-%Y", errors='coerce')
-
-        # Extract date parts or fallback to defaults
         df['Year'] = df['Date'].dt.year.fillna(2023).astype(int)
         df['Month'] = df['Date'].dt.month.fillna(1).astype(int)
         df['Day'] = df['Date'].dt.day.fillna(1).astype(int)
@@ -105,29 +89,31 @@ def predict_from_file(data: FileURLInput):
         df['Weekday_sin'] = np.sin(2 * np.pi * df['Weekday'] / 7)
         df['Weekday_cos'] = np.cos(2 * np.pi * df['Weekday'] / 7)
 
-        # Encode categorical columns using saved encoders (no refitting)
+        # Use encoders to transform categorical columns without refitting
         for col in ['Store', 'Source', 'Holiday_Flag']:
             if col in df.columns:
                 encoder = encoders.get(col)
                 if encoder is None:
                     raise HTTPException(status_code=500, detail=f"Encoder for {col} not found")
-                # Map unknown labels to 'Unknown' before encoding
+
+                # Map unknown labels to 'Unknown' or a default known class
                 df[col] = df[col].apply(lambda x: x if x in encoder.classes_ else 'Unknown')
-                # Extend encoder classes if 'Unknown' missing
+
+                # Add 'Unknown' class if missing to avoid errors
                 if 'Unknown' not in encoder.classes_:
                     encoder.classes_ = np.append(encoder.classes_, 'Unknown')
+
                 df[col] = encoder.transform(df[col].astype(str))
 
-        # Clean numeric columns with currency symbols, commas
+        # Clean numeric columns with commas, currency symbols
         for col in ['discounted_price', 'actual_price', 'discount_percentage', 'rating', 'Weekly_Sales']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace(',', '').str.replace('₹', '').str.replace('$', '')
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-        # Sort by Date before generating lag features
         df = df.sort_values(by='Date')
 
-        # Generate lag and rolling features on Weekly_Sales
+        # Lag and rolling features on Weekly_Sales
         if 'Weekly_Sales' in df.columns:
             df['lag_1'] = df['Weekly_Sales'].shift(1)
             df['lag_2'] = df['Weekly_Sales'].shift(2)
@@ -135,13 +121,12 @@ def predict_from_file(data: FileURLInput):
             df['rolling_mean_3'] = df['Weekly_Sales'].rolling(window=3).mean()
             df['rolling_mean_7'] = df['Weekly_Sales'].rolling(window=7).mean()
 
-            # Drop rows with NaNs created by lagging
             df.dropna(inplace=True)
             actual_values = df['Weekly_Sales'].astype(float).tolist()
         else:
             raise HTTPException(status_code=400, detail="Weekly_Sales column required for lag features")
 
-        # Drop unused columns, including 'Date'
+        # Drop unused columns including 'Date'
         non_numeric_cols = [
             'product_id', 'product_name', 'category', 'about_product',
             'user_id', 'user_name', 'review_id', 'review_title', 'review_content',
@@ -156,7 +141,6 @@ def predict_from_file(data: FileURLInput):
 
         predictions = model.predict(df)
 
-        # Use formatted dates for response (aligned to predictions)
         formatted_dates = df['Date'].dt.strftime('%Y-%m-%d').tolist() if 'Date' in df.columns else [''] * len(predictions)
 
         results = {
