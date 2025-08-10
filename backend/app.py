@@ -7,37 +7,46 @@ import joblib
 import pandas as pd
 import requests
 from io import StringIO, BytesIO
-from sklearn.preprocessing import LabelEncoder
 import numpy as np
 
 MODEL_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model.pkl"
-model = None  # Global model
+ENCODERS_URLS = {
+    "Store": "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/store_encoder.pkl",
+    "Source": "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/source_encoder.pkl",
+    "Holiday_Flag": "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/holiday_encoder.pkl",
+}
+
+model = None
+encoders = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model
+    global model, encoders
     try:
+        # Load model
         response = requests.get(MODEL_URL)
         response.raise_for_status()
         model = joblib.load(BytesIO(response.content))
         print("✅ Model loaded successfully")
+
+        # Load encoders
+        for col, url in ENCODERS_URLS.items():
+            resp = requests.get(url)
+            resp.raise_for_status()
+            encoders[col] = joblib.load(BytesIO(resp.content))
+        print("✅ Encoders loaded successfully")
+
     except Exception as e:
-        print(f"❌ Model load failed: {e}")
+        print(f"❌ Loading failed: {e}")
         model = None
+        encoders = {}
     yield
 
 app = FastAPI(lifespan=lifespan)
 
-origins = [
-    "http://localhost:5000",
-    "http://127.0.0.1:5000",
-    "https://your-flutter-web-url.web.app",
-    "*",
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins or adjust as needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,10 +65,11 @@ async def favicon():
 
 @app.post("/predict")
 def predict_from_file(data: FileURLInput):
-    if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    if model is None or not encoders:
+        raise HTTPException(status_code=503, detail="Model or encoders not loaded")
 
     try:
+        # Download CSV file from provided URL
         response = requests.get(data.file_url)
         response.raise_for_status()
         df = pd.read_csv(StringIO(response.text))
@@ -67,12 +77,12 @@ def predict_from_file(data: FileURLInput):
         if df.empty:
             raise HTTPException(status_code=400, detail="CSV is empty")
 
+        # Ensure all required columns exist, fill missing numeric with 0, categorical with 'Unknown'
         required_columns = [
-            'Store', 'Holiday_Flag', 'Temperature', 'Fuel_Price',
+            'Store', 'Source', 'Holiday_Flag', 'Temperature', 'Fuel_Price',
             'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday',
             'Date', 'Weekly_Sales'
         ]
-
         for col in required_columns:
             if col not in df.columns:
                 if col in ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment', 'Year', 'Month', 'Day', 'Weekday']:
@@ -80,48 +90,74 @@ def predict_from_file(data: FileURLInput):
                 else:
                     df[col] = 'Unknown'
 
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df['Year'] = df['Date'].dt.year.fillna(2025).astype(int)
+        # Parse date (must match training format)
+        df['Date'] = pd.to_datetime(df['Date'], format="%d-%m-%Y", errors='coerce')
+
+        # Extract date parts or fallback to defaults
+        df['Year'] = df['Date'].dt.year.fillna(2023).astype(int)
         df['Month'] = df['Date'].dt.month.fillna(1).astype(int)
         df['Day'] = df['Date'].dt.day.fillna(1).astype(int)
         df['Weekday'] = df['Date'].dt.weekday.fillna(0).astype(int)
 
-        # Seasonality features
+        # Cyclic seasonal features
         df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
         df['Month_cos'] = np.cos(2 * np.pi * df['Month'] / 12)
         df['Weekday_sin'] = np.sin(2 * np.pi * df['Weekday'] / 7)
         df['Weekday_cos'] = np.cos(2 * np.pi * df['Weekday'] / 7)
-        df['IsWeekend'] = df['Weekday'].apply(lambda x: 1 if x >= 5 else 0)
 
-        encoder = LabelEncoder()
-        df['Store'] = encoder.fit_transform(df['Store'].astype(str))
-        df['Holiday_Flag'] = encoder.fit_transform(df['Holiday_Flag'].astype(str))
+        # Encode categorical columns using saved encoders (no refitting)
+        for col in ['Store', 'Source', 'Holiday_Flag']:
+            if col in df.columns:
+                encoder = encoders.get(col)
+                if encoder is None:
+                    raise HTTPException(status_code=500, detail=f"Encoder for {col} not found")
+                # Map unknown labels to 'Unknown' before encoding
+                df[col] = df[col].apply(lambda x: x if x in encoder.classes_ else 'Unknown')
+                # Extend encoder classes if 'Unknown' missing
+                if 'Unknown' not in encoder.classes_:
+                    encoder.classes_ = np.append(encoder.classes_, 'Unknown')
+                df[col] = encoder.transform(df[col].astype(str))
 
+        # Clean numeric columns with currency symbols, commas
+        for col in ['discounted_price', 'actual_price', 'discount_percentage', 'rating', 'Weekly_Sales']:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(',', '').str.replace('₹', '').str.replace('$', '')
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        # Sort by Date before generating lag features
+        df = df.sort_values(by='Date')
+
+        # Generate lag and rolling features on Weekly_Sales
         if 'Weekly_Sales' in df.columns:
-            df = df.sort_values(by='Date')
-            df['lag_1'] = df['Weekly_Sales'].shift(1).fillna(0)
-            df['lag_2'] = df['Weekly_Sales'].shift(2).fillna(0)
-            df['lag_3'] = df['Weekly_Sales'].shift(3).fillna(0)
-            df['rolling_mean_3'] = df['Weekly_Sales'].rolling(window=3).mean().fillna(0)
-            df['rolling_mean_7'] = df['Weekly_Sales'].rolling(window=7).mean().fillna(0)
+            df['lag_1'] = df['Weekly_Sales'].shift(1)
+            df['lag_2'] = df['Weekly_Sales'].shift(2)
+            df['lag_3'] = df['Weekly_Sales'].shift(3)
+            df['rolling_mean_3'] = df['Weekly_Sales'].rolling(window=3).mean()
+            df['rolling_mean_7'] = df['Weekly_Sales'].rolling(window=7).mean()
+
+            # Drop rows with NaNs created by lagging
+            df.dropna(inplace=True)
             actual_values = df['Weekly_Sales'].astype(float).tolist()
         else:
-            df['lag_1'] = 0
-            df['lag_2'] = 0
-            df['lag_3'] = 0
-            df['rolling_mean_3'] = 0
-            df['rolling_mean_7'] = 0
-            actual_values = [0.0] * len(df)
+            raise HTTPException(status_code=400, detail="Weekly_Sales column required for lag features")
 
-        formatted_dates = df['Date'].dt.strftime('%Y-%m-%d').fillna('2025-01-01').tolist()
+        # Drop unused columns, including 'Date'
+        non_numeric_cols = [
+            'product_id', 'product_name', 'category', 'about_product',
+            'user_id', 'user_name', 'review_id', 'review_title', 'review_content',
+            'img_link', 'product_link', 'Date'
+        ]
+        df.drop(columns=[col for col in non_numeric_cols if col in df.columns], inplace=True)
 
-        df.drop(columns=['Weekly_Sales', 'Date', 'DateStr'], errors='ignore', inplace=True)
         df.fillna(0, inplace=True)
 
         if df.empty:
-            raise HTTPException(status_code=400, detail="No valid rows for prediction")
+            raise HTTPException(status_code=400, detail="No valid rows for prediction after preprocessing")
 
         predictions = model.predict(df)
+
+        # Use formatted dates for response (aligned to predictions)
+        formatted_dates = df['Date'].dt.strftime('%Y-%m-%d').tolist() if 'Date' in df.columns else [''] * len(predictions)
 
         results = {
             "actual_values": [float(x) for x in actual_values],
