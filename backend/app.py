@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import pandas as pd
+import numpy as np
 import joblib
 import requests
 import io
@@ -17,6 +18,70 @@ MODEL_AND_ENCODERS_URL = (
 model = None
 encoders = {}
 feature_columns = None  # Keep feature order
+
+
+# === Preprocessing function with optional engineered features ===
+def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # Date features
+    if 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'], format="%d-%m-%Y", errors='coerce')
+
+        if not {'Month_sin', 'Month_cos'}.issubset(df.columns):
+            df['Month'] = df['Date'].dt.month
+            df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
+            df['Month_cos'] = np.cos(2 * np.pi * df['Month'] / 12)
+
+        if not {'Weekday_sin', 'Weekday_cos'}.issubset(df.columns):
+            df['Weekday'] = df['Date'].dt.weekday
+            df['Weekday_sin'] = np.sin(2 * np.pi * df['Weekday'] / 7)
+            df['Weekday_cos'] = np.cos(2 * np.pi * df['Weekday'] / 7)
+    else:
+        # If no Date column, set dummy features (optional)
+        if not {'Month_sin', 'Month_cos'}.issubset(df.columns):
+            df['Month_sin'] = 0
+            df['Month_cos'] = 0
+        if not {'Weekday_sin', 'Weekday_cos'}.issubset(df.columns):
+            df['Weekday_sin'] = 0
+            df['Weekday_cos'] = 0
+
+    # Clean numeric columns
+    for col in ['discounted_price', 'actual_price', 'discount_percentage', 'rating', 'Weekly_Sales']:
+        if col in df.columns:
+            df[col] = df[col].replace({',': '', '₹': '', '$': ''}, regex=True)
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Lag and rolling features for Weekly_Sales
+    if 'Weekly_Sales' in df.columns:
+        df = df.sort_values(by='Date')
+        if 'lag_1' not in df.columns:
+            df['lag_1'] = df['Weekly_Sales'].shift(1)
+        if 'lag_2' not in df.columns:
+            df['lag_2'] = df['Weekly_Sales'].shift(2)
+        if 'lag_3' not in df.columns:
+            df['lag_3'] = df['Weekly_Sales'].shift(3)
+        if 'rolling_mean_3' not in df.columns:
+            df['rolling_mean_3'] = df['Weekly_Sales'].rolling(window=3).mean()
+        if 'rolling_mean_7' not in df.columns:
+            df['rolling_mean_7'] = df['Weekly_Sales'].rolling(window=7).mean()
+
+    # Interaction feature example
+    if 'discount_percentage' in df.columns and 'rating' in df.columns:
+        if 'discount_rating_interaction' not in df.columns:
+            df['discount_rating_interaction'] = df['discount_percentage'] * df['rating']
+
+    # Drop irrelevant text columns (optional)
+    irrelevant_cols = [
+        'product_id', 'product_name', 'category', 'about_product',
+        'user_id', 'user_name', 'review_id', 'review_title', 'review_content',
+        'img_link', 'product_link'
+    ]
+    df.drop(columns=[col for col in irrelevant_cols if col in df.columns], inplace=True)
+
+    df.dropna(inplace=True)  # Drop rows with NaNs created by lag/rolling shifts etc.
+
+    return df
 
 
 # === LIFESPAN: Load Model + Encoders ===
@@ -89,6 +154,9 @@ async def predict(file: UploadFile = File(...)):
         # Read CSV
         df = pd.read_csv(file.file)
 
+        # Preprocess input with optional engineered features
+        df = preprocess_optional_engineered_features(df)
+
         # Apply label encoders
         for col, encoder in encoders.items():
             if col in df.columns:
@@ -110,7 +178,7 @@ async def predict(file: UploadFile = File(...)):
             if missing_cols:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Missing required feature columns: {missing_cols}",
+                    detail=f"Missing required feature columns after preprocessing: {missing_cols}",
                 )
             df = df[feature_columns]
 
@@ -132,4 +200,3 @@ async def predict(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
