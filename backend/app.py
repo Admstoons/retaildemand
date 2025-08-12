@@ -12,7 +12,7 @@ import traceback
 
 # === CONFIG ===
 MODEL_AND_ENCODERS_URL = (
-    "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model.pkl"
+    "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model_with_encoders.pkl"
 )
 
 model = None
