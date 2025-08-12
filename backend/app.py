@@ -222,5 +222,14 @@ async def predict(file: UploadFile = File(...)):
         traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
 
+# === Feature Importance Endpoint ===
+@app.get("/feature_importance")
+async def get_feature_importance():
+    if model is None or feature_columns is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    return JSONResponse(content={
+        "feature_importance": dict(zip(feature_columns, model.feature_importances_.tolist()))
+    })
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
