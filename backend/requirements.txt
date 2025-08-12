@@ -7,3 +7,4 @@ requests
 scikit-learn
 xgboost
 joblib
+python-multipart
