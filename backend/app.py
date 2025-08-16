@@ -83,13 +83,13 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
             elif df[date_col].isna().any():
                 print("Warning: Some dates are still NaT after parsing. These rows will get default date features.")
 
-            df['Year'] = df[date_col].dt.year.fillna(required_features_defaults['Year']).astype(int)
-            df['Month'] = df[date_col].dt.month.fillna(required_features_defaults['Month']).astype(int)
-            df['Day'] = df[date_col].dt.day.fillna(required_features_defaults['Day']).astype(int)
-            df['Weekday'] = df[date_col].dt.weekday.fillna(required_features_defaults['Weekday']).astype(int)
+            df['Year'] = df[date_col].dt.year.fillna(0).astype(int) # Change fillna to 0
+            df['Month'] = df[date_col].dt.month.fillna(0).astype(int) # Change fillna to 0
+            df['Day'] = df[date_col].dt.day.fillna(0).astype(int) # Change fillna to 0
+            df['Weekday'] = df[date_col].dt.weekday.fillna(0).astype(int) # Change fillna to 0
             
-            df['WeekOfYear'] = df[date_col].dt.isocalendar().week.fillna(required_features_defaults['WeekOfYear']).astype(int)
-            df['DayOfYear'] = df[date_col].dt.dayofyear.fillna(required_features_defaults['DayOfYear']).astype(int)
+            df['WeekOfYear'] = df[date_col].dt.isocalendar().week.fillna(0).astype(int) # Change fillna to 0
+            df['DayOfYear'] = df[date_col].dt.dayofyear.fillna(0).astype(int) # Change fillna to 0
 
             # Cyclic encoding for Month and Weekday
             df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
@@ -118,14 +118,14 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
                       'Is_Month_Start', 'Is_Month_End', 'Is_Quarter_Start', 'Is_Quarter_End',
                       'Is_Year_Start', 'Is_Year_End']:
                 if f not in df.columns:
-                    df[f] = required_features_defaults.get(f, 0) # Use 0 as a fallback default
+                    df[f] = 0 # Change default value from required_features_defaults.get(f, 0) to just 0
             
             if date_col in df.columns:
                 df.drop(columns=[date_col], inplace=True, errors='ignore')
 
     else:
         print("No 'Date' column found, using default date features and cyclic/boolean values.")
-        # Defaults for date components are already set at the beginning of the function
+        # Defaults for date components are already set at the beginning of the function (now 0, not from required_features_defaults)
         # No need to drop date_col as it was never present
             
     # Clean numeric columns (price, rating related, and Weekly_Sales)
