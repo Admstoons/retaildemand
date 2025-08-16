@@ -326,6 +326,11 @@ async def predict(request: Request, file: UploadFile = File(None)):
         print("Starting preprocessing with preprocess_optional_engineered_features...")
         df_processed = preprocess_optional_engineered_features(df.copy()) # Pass a copy to avoid modifying original df for actual_prices/dates
         print(f"DataFrame after preprocessing (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
+        # Add more specific logging for 'Year' column here
+        if 'Year' in df_processed.columns:
+            print(f"Year column present after preprocessing. First few values: {df_processed['Year'].head().tolist()}, dtype: {df_processed['Year'].dtype}")
+        else:
+            print("Year column NOT present after preprocessing.")
 
 
         # ---------- 4) Apply label encoders ----------
@@ -350,12 +355,24 @@ async def predict(request: Request, file: UploadFile = File(None)):
                     print(f"Column {col} not found in processed data, set to default value 0 for encoding.")
 
         print(f"DataFrame after label encoding (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
+        # Add more specific logging for 'Year' column here
+        if 'Year' in df_processed.columns:
+            print(f"Year column present after encoding. First few values: {df_processed['Year'].head().tolist()}, dtype: {df_processed['Year'].dtype}")
+        else:
+            print("Year column NOT present after encoding.")
 
         # Ensure all columns are numeric after encoding
         for col in df_processed.columns:
             # IMPORTANT: Use df_processed[col] here, not df[col] as df is the original
             df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce').fillna(0)
             
+        print(f"DataFrame after final numeric conversion (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
+        if 'Year' in df_processed.columns:
+            print(f"Year column present after numeric conversion. First few values: {df_processed['Year'].head().tolist()}, dtype: {df_processed['Year'].dtype}")
+        else:
+            print("Year column NOT present after numeric conversion.")
+
+
         # ---------- 5) Match training column order ----------
         if feature_columns:
             # Add any missing columns that the model expects, fill with 0
@@ -366,12 +383,19 @@ async def predict(request: Request, file: UploadFile = File(None)):
                 print(f"Added missing columns with zeros: {missing_cols}")
             
             # Drop any extra columns that the model does not expect, and reorder columns
+            # This is where the KeyError for 'Year' might happen if df_processed does not have 'Year'
+            print(f"Before final column reorder. df_processed columns: {list(df_processed.columns)}, feature_columns: {feature_columns}")
             df_processed = df_processed[feature_columns]
             print(f"Reordered columns to match training: {list(df_processed.columns)}")
         else:
             raise ValueError("Feature columns not loaded. Cannot match input to model.")
-
+        
         print(f"DataFrame ready for prediction (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
+        if 'Year' in df_processed.columns:
+            print(f"Year column present before prediction. First few values: {df_processed['Year'].head().tolist()}, dtype: {df_processed['Year'].dtype}")
+        else:
+            print("Year column NOT present before prediction. THIS IS CRITICAL.")
+
 
         # ---------- 6) Predict ----------
         predictions = model.predict(df_processed)
