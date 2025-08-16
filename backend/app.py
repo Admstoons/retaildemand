@@ -49,7 +49,7 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
         'Is_Quarter_End': 0, 'Is_Year_Start': 0, 'Is_Year_End': 0,
         'lag_1': 0, 'lag_2': 0, 'lag_3': 0, 'lag_7': 0,
         'rolling_mean_3': 0, 'rolling_mean_7': 0, 'rolling_mean_14': 0,
-        'rolling_mean_28': 0, 'rolling_std_7'
+        'rolling_mean_28': 0, 'rolling_std_7': 0
     }
 
     # Ensure all required features are present, fill with default values if missing
