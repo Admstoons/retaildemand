@@ -105,8 +105,9 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
             df['Is_Year_Start'] = df[date_col].dt.is_year_start.astype(int)
             df['Is_Year_End'] = df[date_col].dt.is_year_end.astype(int)
             
-            df.drop(columns=[date_col], inplace=True, errors='ignore') # Drop original Date column
             print(f"Derived date features: Year={df['Year'].iloc[0]}, Month={df['Month'].iloc[0]}, WeekOfYear={df['WeekOfYear'].iloc[0]}")
+            
+            df.drop(columns=[date_col], inplace=True, errors='ignore') # Drop original Date column
         except Exception as e:
             print(f"Error during date feature engineering: {e}")
             traceback.print_exc()
