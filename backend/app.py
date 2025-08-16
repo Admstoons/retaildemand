@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,94 +39,125 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     print("Starting preprocessing for prediction...")
 
     # Define required features with default values (matching training)
-    required_features = {
-        'Year': 2023,
-        'Month': 1,
-        'Day': 1,
-        'Weekday': 0,
-        'Month_sin': 0,
-        'Month_cos': 0,
-        'Weekday_sin': 0,
-        'Weekday_cos': 0,
-        'lag_1': 0,
-        'lag_2': 0,
-        'lag_3': 0,
-        'rolling_mean_3': 0,
-        'rolling_mean_7': 0,
+    # These defaults are primarily for handling cases where input CSV might lack certain columns
+    required_features_defaults = {
+        'Year': 2023, 'Month': 1, 'Day': 1, 'Weekday': 0,
+        'WeekOfYear': 1, 'DayOfYear': 1,
+        'Month_sin': 0, 'Month_cos': 0, 'Weekday_sin': 0, 'Weekday_cos': 0,
+        'Is_Month_Start': 0, 'Is_Month_End': 0, 'Is_Quarter_Start': 0,
+        'Is_Quarter_End': 0, 'Is_Year_Start': 0, 'Is_Year_End': 0,
+        'lag_1': 0, 'lag_2': 0, 'lag_3': 0, 'lag_7': 0,
+        'rolling_mean_3': 0, 'rolling_mean_7': 0, 'rolling_mean_14': 0,
+        'rolling_mean_28': 0, 'rolling_std_7': 0,
         'discount_rating_interaction': 0
     }
 
-    # Date features
-    if 'Date' in df.columns:
+    # Ensure all required features are present, fill with default values if missing
+    for feature, default_value in required_features_defaults.items():
+        if feature not in df.columns:
+            df[feature] = default_value
+            print(f"Added missing column '{feature}' with default value {default_value}")
+
+    # Date features - matching training notebook's logic
+    # Find the correct date column, case-insensitively
+    date_col = None
+    for col_name in ["Date", "date", "DATE"]:
+        if col_name in df.columns:
+            date_col = col_name
+            break
+
+    if date_col:
         # Accept a variety of date formats but try the project's expected format first
-        df['Date'] = pd.to_datetime(df['Date'], format="%d-%m-%Y", errors='coerce')
+        df[date_col] = pd.to_datetime(df[date_col], format="%d-%m-%Y", errors='coerce')
         # fallback: try parsing any format for rows that stayed NaT
-        if df['Date'].isna().any():
-            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df['Year'] = df['Date'].dt.year.fillna(required_features['Year']).astype(int)
-        df['Month'] = df['Date'].dt.month.fillna(required_features['Month']).astype(int)
-        df['Day'] = df['Date'].dt.day.fillna(required_features['Day']).astype(int)
-        df['Weekday'] = df['Date'].dt.weekday.fillna(required_features['Weekday']).astype(int)
+        if df[date_col].isna().any():
+            df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+
+        df['Year'] = df[date_col].dt.year.fillna(required_features_defaults['Year']).astype(int)
+        df['Month'] = df[date_col].dt.month.fillna(required_features_defaults['Month']).astype(int)
+        df['Day'] = df[date_col].dt.day.fillna(required_features_defaults['Day']).astype(int)
+        df['Weekday'] = df[date_col].dt.weekday.fillna(required_features_defaults['Weekday']).astype(int)
+        
+        df['WeekOfYear'] = df[date_col].dt.isocalendar().week.fillna(required_features_defaults['WeekOfYear']).astype(int)
+        df['DayOfYear'] = df[date_col].dt.dayofyear.fillna(required_features_defaults['DayOfYear']).astype(int)
+
+        # Cyclic encoding for Month and Weekday
         df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
         df['Month_cos'] = np.cos(2 * np.pi * df['Month'] / 12)
         df['Weekday_sin'] = np.sin(2 * np.pi * df['Weekday'] / 7)
         df['Weekday_cos'] = np.cos(2 * np.pi * df['Weekday'] / 7)
-    else:
-        print("No 'Date' column found, setting default date features")
-        for feature, default_value in required_features.items():
-            if feature not in df.columns:
-                df[feature] = default_value
 
-    # Clean numeric columns
+        # Boolean flags for start/end of month, quarter, and year
+        df['Is_Month_Start'] = df[date_col].dt.is_month_start.astype(int)
+        df['Is_Month_End'] = df[date_col].dt.is_month_end.astype(int)
+        df['Is_Quarter_Start'] = df[date_col].dt.is_quarter_start.astype(int)
+        df['Is_Quarter_End'] = df[date_col].dt.is_quarter_end.astype(int)
+        df['Is_Year_Start'] = df[date_col].dt.is_year_start.astype(int)
+        df['Is_Year_End'] = df[date_col].dt.is_year_end.astype(int)
+        
+        df.drop(columns=[date_col], inplace=True, errors='ignore') # Drop original Date column
+    else:
+        print("No 'Date' column found, using default date features and cyclic/boolean values")
+        # Defaults for date components are already set at the beginning of the function
+            
+    # Clean numeric columns (price, rating related, and Weekly_Sales)
     for col in ['discounted_price', 'actual_price', 'discount_percentage', 'rating', 'Weekly_Sales']:
         if col in df.columns:
             df[col] = df[col].replace({',': '', '₹': '', '$': ''}, regex=True)
             df[col] = pd.to_numeric(df[col], errors='coerce')
             print(f"Cleaned column: {col}")
 
-    # Lag and rolling features for Weekly_Sales
-    if 'Weekly_Sales' in df.columns and 'Date' in df.columns:
-        df = df.sort_values(by='Date').reset_index(drop=True)
+    # Lag and rolling features for Weekly_Sales - matching training notebook's logic
+    if 'Weekly_Sales' in df.columns:
+        # Sort by date before creating time-series features
+        # Ensure 'Year', 'Month', 'Day' are available for sorting if original 'Date' was dropped
+        if 'Year' in df.columns and 'Month' in df.columns and 'Day' in df.columns:
+            # Create a temporary datetime column for sorting if original 'Date' was dropped
+            df['_temp_date_for_sort'] = pd.to_datetime(df[['Year', 'Month', 'Day']], errors='coerce')
+            # Only sort if _temp_date_for_sort column is not all NaT (i.e. at least some dates parsed correctly)
+            if not df['_temp_date_for_sort'].isna().all():
+                df = df.sort_values(by='_temp_date_for_sort').reset_index(drop=True)
+            df.drop(columns=['_temp_date_for_sort'], inplace=True, errors='ignore')
+        else: # If no date components at all, still try to sort by index as a fallback
+            df = df.sort_index().reset_index(drop=True)
+
         df['lag_1'] = df['Weekly_Sales'].shift(1).fillna(0)
         df['lag_2'] = df['Weekly_Sales'].shift(2).fillna(0)
         df['lag_3'] = df['Weekly_Sales'].shift(3).fillna(0)
+        df['lag_7'] = df['Weekly_Sales'].shift(7).fillna(0) # Added lag_7
         df['rolling_mean_3'] = df['Weekly_Sales'].rolling(window=3).mean().fillna(0)
         df['rolling_mean_7'] = df['Weekly_Sales'].rolling(window=7).mean().fillna(0)
+        df['rolling_mean_14'] = df['Weekly_Sales'].rolling(window=14).mean().fillna(0) # Added rolling_mean_14
+        df['rolling_mean_28'] = df['Weekly_Sales'].rolling(window=28).mean().fillna(0) # Added rolling_mean_28
+        df['rolling_std_7'] = df['Weekly_Sales'].rolling(window=7).std().fillna(0) # Added rolling_std_7
         print("Generated lag and rolling features")
     else:
-        print("No 'Weekly_Sales' or 'Date' column, setting lag/rolling features to 0")
-        for feature in ['lag_1', 'lag_2', 'lag_3', 'rolling_mean_3', 'rolling_mean_7']:
-            df[feature] = 0
-
+        print("No 'Weekly_Sales' column, setting lag/rolling features to default values (0)")
+        # Defaults are already set for these at the beginning of the function
+            
     # Interaction feature
     if 'discount_percentage' in df.columns and 'rating' in df.columns:
         df['discount_rating_interaction'] = df['discount_percentage'] * df['rating']
         print("Generated interaction feature: discount_rating_interaction")
     else:
-        df['discount_rating_interaction'] = 0
+        # Default is already set for this at the beginning of the function
+        pass
 
-    # Drop irrelevant text columns
+    # Drop irrelevant text columns - matching training notebook's logic
     irrelevant_cols = [
         'product_id', 'product_name', 'category', 'about_product',
         'user_id', 'user_name', 'review_id', 'review_title', 'review_content',
         'img_link', 'product_link'
     ]
-    df.drop(columns=[col for col in irrelevant_cols if col in df.columns], inplace=True)
+    df.drop(columns=[col for col in irrelevant_cols if col in df.columns], inplace=True, errors='ignore')
     print(f"Dropped columns: {[col for col in irrelevant_cols if col in df.columns]}")
 
-    # Fill NaNs in engineered features
-    for feature in required_features:
-        if feature in df.columns:
-            df[feature] = df[feature].fillna(0)
-
-    # Drop rows only if critical features are missing
-    if feature_columns:
-        critical_cols = [col for col in feature_columns if col in df.columns]
-        if critical_cols:
-            before = len(df)
-            df.dropna(subset=critical_cols, inplace=True)
-            after = len(df)
-            print(f"Dropped {before - after} rows with NaNs in critical features")
+    # Final fill NaNs for any remaining numeric columns not covered (e.g., Temperature, Fuel_Price if missing)
+    # This also catches any NaNs introduced by operations if default wasn't sufficient or new NaN occurred.
+    df.fillna(0, inplace=True) 
+    
+    # Do not drop rows at this stage, as it will be handled by filtering with feature_columns later
+    # and dropping rows here might remove data needed for actual_price and dates in the response.
 
     if df.empty:
         raise ValueError("Dataframe is empty after preprocessing")
@@ -231,29 +263,36 @@ async def predict(request: Request, file: UploadFile = File(None)):
 
         # ---------- 2) Save original date and actual_price columns for output ----------
         # date candidates
-        date_col = None
+        date_col_name_original = None
         for candidate in ["Date", "date", "DATE"]:
             if candidate in df.columns:
-                date_col = candidate
+                date_col_name_original = candidate
                 break
-        dates = df[date_col].astype(str).tolist() if date_col else [str(i) for i in range(len(df))]
-
+        
+        # Capture dates before preprocessing potentially drops the column or changes its format
+        if date_col_name_original:
+            original_dates = df[date_col_name_original].copy() # Capture as Series
+        else:
+            original_dates = None # No date column in original input
+            
         # actual price column candidates
-        actual_col = None
+        actual_col_name_original = None
         for candidate in ["actual_price", "Actual", "actual", "Weekly_Sales", "weekly_sales"]:
             if candidate in df.columns:
-                actual_col = candidate
+                actual_col_name_original = candidate
                 break
-        if actual_col:
-            # coerce to numeric, keep NAs as None
-            actual_prices = pd.to_numeric(df[actual_col].replace({',': ''}, regex=True), errors='coerce').tolist()
+        
+        if actual_col_name_original:
+            # coerce to numeric, keep NAs as None, convert commas/symbols
+            actual_prices = pd.to_numeric(df[actual_col_name_original].replace({',': ''}, regex=True), errors='coerce').tolist()
             # convert nan -> None for JSON friendly
             actual_prices = [None if (pd.isna(x)) else float(x) for x in actual_prices]
         else:
             actual_prices = [None] * len(df)
 
+
         # ---------- 3) Preprocess ----------
-        df_processed = preprocess_optional_engineered_features(df)
+        df_processed = preprocess_optional_engineered_features(df.copy()) # Pass a copy to avoid modifying original df for actual_prices/dates
 
         # ---------- 4) Apply label encoders ----------
         # encoders expected to be a dict: { column_name: encoder_obj }
@@ -261,38 +300,65 @@ async def predict(request: Request, file: UploadFile = File(None)):
             if col in df_processed.columns:
                 try:
                     # convert to string before transform to match training pipeline
-                    df_processed[col] = encoder.transform(df_processed[col].astype(str))
+                    df_processed[col] = df_processed[col].astype(str)
+                    # Handle unseen labels during inference by converting to string and then encoding
+                    # If a label is not seen, encoder.transform will raise an error,
+                    # so we map known labels and use a placeholder for unknown ones.
+                    df_processed[col] = df_processed[col].apply(lambda x: encoder.transform([x])[0] if x in encoder.classes_ else -1) # Use -1 for unseen
                     print(f"Encoded column: {col}")
                 except Exception as enc_err:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Encoding failed for column '{col}': {str(enc_err)}",
-                    )
+                    print(f"Warning: Encoding failed for column '{col}'. Setting to 0. Error: {str(enc_err)}")
+                    df_processed[col] = 0 # Fallback to 0 if encoding fails
             else:
-                # Only add a zero column if the encoder existed in training
-                if encoder is not None:
+                # Only add a zero column if the encoder existed in training (i.e. if it was a feature)
+                if encoder is not None: # Check if encoder actually exists in the dict
                     df_processed[col] = 0
-                    print(f"Column {col} not found, set to default value 0")
+                    print(f"Column {col} not found in processed data, set to default value 0 for encoding.")
+
+        # Ensure all columns are numeric after encoding
+        for col in df_processed.columns:
+            df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce').fillna(0)
+
 
         # ---------- 5) Match training column order ----------
         if feature_columns:
+            # Add any missing columns that the model expects, fill with 0
             missing_cols = [c for c in feature_columns if c not in df_processed.columns]
             if missing_cols:
                 for c in missing_cols:
                     df_processed[c] = 0
                 print(f"Added missing columns with zeros: {missing_cols}")
-            # Reorder: select only feature_columns (this will drop extra columns)
+            
+            # Drop any extra columns that the model does not expect, and reorder columns
             df_processed = df_processed[feature_columns]
             print(f"Reordered columns to match training: {list(df_processed.columns)}")
+        else:
+            raise ValueError("Feature columns not loaded. Cannot match input to model.")
 
         # ---------- 6) Predict ----------
         predictions = model.predict(df_processed)
         # Ensure predictions are plain Python floats
         predicted_list = [float(x) for x in predictions]
 
-        # ---------- 7) Return result ----------
+        # ---------- 7) Prepare dates for response ----------
+        # Use the original dates captured earlier, or default to generic if none existed
+        if original_dates is not None and not original_dates.empty:
+            response_dates = original_dates.astype(str).tolist()
+        elif 'Year' in df_processed.columns and 'Month' in df_processed.columns and 'Day' in df_processed.columns:
+            # Fallback to reconstructed dates from preprocessed df if original date column was dropped/missing
+            # Ensure these are integer types before converting to string for dates
+            df_processed['Year'] = df_processed['Year'].astype(int)
+            df_processed['Month'] = df_processed['Month'].astype(int)
+            df_processed['Day'] = df_processed['Day'].astype(int)
+            response_dates = (df_processed['Year'].astype(str) + '-' + 
+                              df_processed['Month'].astype(str) + '-' + 
+                              df_processed['Day'].astype(str)).tolist()
+        else:
+            response_dates = [str(i) for i in range(len(predicted_list))] # Generic numbering if no date info at all
+
+        # ---------- 8) Return result ----------
         return PredictResponse(
-            dates=[str(d) for d in dates],
+            dates=[str(d) for d in response_dates], # Ensure all dates are strings
             actual_price=actual_prices,
             predicted_price=predicted_list,
             total_predictions=len(predicted_list)
