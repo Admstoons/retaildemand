@@ -38,6 +38,10 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     print("Starting preprocessing for prediction...")
     print(f"Input DataFrame columns at start of preprocessing: {list(df.columns)}")
+    print("Input DataFrame head (first 5 rows) for preprocessing:")
+    print(df.head().to_string())
+    print("Input DataFrame info for preprocessing:")
+    df.info()
 
     # Define required features with default values (matching training)
     # These defaults are primarily for handling cases where input CSV might lack certain columns
@@ -322,6 +326,12 @@ async def predict(request: Request, file: UploadFile = File(None)):
         print("Starting preprocessing with preprocess_optional_engineered_features...")
         df_processed = preprocess_optional_engineered_features(df.copy()) # Pass a copy to avoid modifying original df for actual_prices/dates
         print(f"DataFrame after preprocessing (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
+        print("DataFrame after preprocessing head:")
+        print(df_processed.head().to_string())
+        print("DataFrame after preprocessing describe:")
+        print(df_processed.describe().to_string())
+        print("DataFrame after preprocessing info:")
+        df_processed.info()
         # Add more specific logging for 'Year' column here
         if 'Year' in df_processed.columns:
             print(f"Year column present after preprocessing. First few values: {df_processed['Year'].head().tolist()}, dtype: {df_processed['Year'].dtype}")
@@ -387,6 +397,12 @@ async def predict(request: Request, file: UploadFile = File(None)):
             raise ValueError("Feature columns not loaded. Cannot match input to model.")
         
         print(f"DataFrame ready for prediction (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
+        print("DataFrame ready for prediction head:")
+        print(df_processed.head().to_string())
+        print("DataFrame ready for prediction describe:")
+        print(df_processed.describe().to_string())
+        print("DataFrame ready for prediction info:")
+        df_processed.info()
         if 'Year' in df_processed.columns:
             print(f"Year column present before prediction. First few values: {df_processed['Year'].head().tolist()}, dtype: {df_processed['Year'].dtype}")
         else:
