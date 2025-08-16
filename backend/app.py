@@ -49,8 +49,7 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
         'Is_Quarter_End': 0, 'Is_Year_Start': 0, 'Is_Year_End': 0,
         'lag_1': 0, 'lag_2': 0, 'lag_3': 0, 'lag_7': 0,
         'rolling_mean_3': 0, 'rolling_mean_7': 0, 'rolling_mean_14': 0,
-        'rolling_mean_28': 0, 'rolling_std_7': 0,
-        'discount_rating_interaction': 0
+        'rolling_mean_28': 0, 'rolling_std_7'
     }
 
     # Ensure all required features are present, fill with default values if missing
@@ -164,12 +163,8 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
         # Defaults are already set for these at the beginning of the function
             
     # Interaction feature
-    if 'discount_percentage' in df.columns and 'rating' in df.columns:
-        df['discount_rating_interaction'] = df['discount_percentage'] * df['rating']
-        print("Generated interaction feature: discount_rating_interaction")
-    else:
-        # Default is already set for this at the beginning of the function
-        pass
+    # No interaction feature as discount_percentage and rating are not in the training data
+    pass
 
     # Drop irrelevant text columns - matching training notebook's logic
     irrelevant_cols = [
