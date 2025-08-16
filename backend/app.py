@@ -1,10 +1,9 @@
-
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict # Added Dict for performance_metrics
 import pandas as pd
 import numpy as np
 import joblib
@@ -31,6 +30,7 @@ class PredictResponse(BaseModel):
     actual_price: List[Optional[float]]
     predicted_price: List[float]
     total_predictions: int
+    performance_metrics: Optional[Dict[str, float]] = None # Added for model metrics
 
 
 # === Preprocessing function with optional engineered features ===
@@ -317,8 +317,7 @@ async def predict(request: Request, file: UploadFile = File(None)):
 
         # Ensure all columns are numeric after encoding
         for col in df_processed.columns:
-            df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce').fillna(0)
-
+            df_processed[col] = pd.to_numeric(df[col], errors='coerce').fillna(0) # IMPORTANT: Use original df[col] for numeric conversion here
 
         # ---------- 5) Match training column order ----------
         if feature_columns:
@@ -340,7 +339,52 @@ async def predict(request: Request, file: UploadFile = File(None)):
         # Ensure predictions are plain Python floats
         predicted_list = [float(x) for x in predictions]
 
-        # ---------- 7) Prepare dates for response ----------
+        # ---------- 7) Calculate Performance Metrics (if actual_price available) ----------
+        performance_metrics = {}
+        if actual_col_name_original and actual_prices:
+            # Filter out None values from actual_prices for metric calculation
+            valid_actuals = np.array([x for x in actual_prices if x is not None])
+            valid_predictions = np.array([predicted_list[i] for i, x in enumerate(actual_prices) if x is not None])
+
+            if len(valid_actuals) > 0:
+                errors = np.abs(valid_actuals - valid_predictions)
+
+                mae = np.mean(errors)
+                mse = np.mean(errors**2)
+                rmse = np.sqrt(mse)
+                
+                # Calculate R2 score only if actual_values has variance
+                if np.sum((valid_actuals - np.mean(valid_actuals))**2) > 0:
+                    r2 = 1 - (np.sum((errors)**2) / np.sum((valid_actuals - np.mean(valid_actuals))**2))
+                else:
+                    r2 = 0.0 # If actual values are constant, R2 is undefined or 0
+                
+                # Calculate MAPE (Mean Absolute Percentage Error)
+                mape_errors = []
+                for i in range(len(valid_actuals)):
+                    if valid_actuals[i] != 0: # Avoid division by zero
+                        mape_errors.append(np.abs((valid_actuals[i] - valid_predictions[i]) / valid_actuals[i]))
+                
+                if len(mape_errors) > 0:
+                    mape = np.mean(mape_errors) * 100
+                else:
+                    mape = 0.0 # No valid actual values to calculate MAPE
+
+                performance_metrics = {
+                    "mae": round(float(mae), 2),
+                    "mse": round(float(mse), 2),
+                    "rmse": round(float(rmse), 2),
+                    "r2": round(float(r2), 4),
+                    "mape": round(float(mape), 2)
+                }
+                print("Calculated performance metrics:", performance_metrics)
+            else:
+                print("⚠️ No valid actual values for performance metrics calculation.")
+        else:
+            print("⚠️ 'Weekly_Sales' or 'actual_price' column not found or no valid actuals, performance metrics not available.")
+
+
+        # ---------- 8) Prepare dates for response ----------
         # Use the original dates captured earlier, or default to generic if none existed
         if original_dates is not None and not original_dates.empty:
             response_dates = original_dates.astype(str).tolist()
@@ -356,12 +400,13 @@ async def predict(request: Request, file: UploadFile = File(None)):
         else:
             response_dates = [str(i) for i in range(len(predicted_list))] # Generic numbering if no date info at all
 
-        # ---------- 8) Return result ----------
+        # ---------- 9) Return result ----------
         return PredictResponse(
             dates=[str(d) for d in response_dates], # Ensure all dates are strings
             actual_price=actual_prices,
             predicted_price=predicted_list,
-            total_predictions=len(predicted_list)
+            total_predictions=len(predicted_list),
+            performance_metrics=performance_metrics if performance_metrics else None # Include metrics if calculated
         )
 
     except HTTPException:
