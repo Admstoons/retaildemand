@@ -37,6 +37,7 @@ class PredictResponse(BaseModel):
 def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     print("Starting preprocessing for prediction...")
+    print(f"Input DataFrame columns at start of preprocessing: {list(df.columns)}")
 
     # Define required features with default values (matching training)
     # These defaults are primarily for handling cases where input CSV might lack certain columns
@@ -67,38 +68,64 @@ def preprocess_optional_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
             break
 
     if date_col:
+        print(f"Date column identified: {date_col}")
         # Accept a variety of date formats but try the project's expected format first
-        df[date_col] = pd.to_datetime(df[date_col], format="%d-%m-%Y", errors='coerce')
-        # fallback: try parsing any format for rows that stayed NaT
-        if df[date_col].isna().any():
-            df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        try:
+            df[date_col] = pd.to_datetime(df[date_col], format="%d-%m-%Y", errors='coerce')
+            # fallback: try parsing any format for rows that stayed NaT
+            if df[date_col].isna().any():
+                print(f"Some dates failed with %d-%m-%Y, trying generic parse for NaT values.")
+                df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+            
+            # Check for NaT values after all parsing attempts
+            if df[date_col].isna().all():
+                raise ValueError("All dates failed to parse after all attempts.")
+            elif df[date_col].isna().any():
+                print("Warning: Some dates are still NaT after parsing. These rows will get default date features.")
 
-        df['Year'] = df[date_col].dt.year.fillna(required_features_defaults['Year']).astype(int)
-        df['Month'] = df[date_col].dt.month.fillna(required_features_defaults['Month']).astype(int)
-        df['Day'] = df[date_col].dt.day.fillna(required_features_defaults['Day']).astype(int)
-        df['Weekday'] = df[date_col].dt.weekday.fillna(required_features_defaults['Weekday']).astype(int)
-        
-        df['WeekOfYear'] = df[date_col].dt.isocalendar().week.fillna(required_features_defaults['WeekOfYear']).astype(int)
-        df['DayOfYear'] = df[date_col].dt.dayofyear.fillna(required_features_defaults['DayOfYear']).astype(int)
+            df['Year'] = df[date_col].dt.year.fillna(required_features_defaults['Year']).astype(int)
+            df['Month'] = df[date_col].dt.month.fillna(required_features_defaults['Month']).astype(int)
+            df['Day'] = df[date_col].dt.day.fillna(required_features_defaults['Day']).astype(int)
+            df['Weekday'] = df[date_col].dt.weekday.fillna(required_features_defaults['Weekday']).astype(int)
+            
+            df['WeekOfYear'] = df[date_col].dt.isocalendar().week.fillna(required_features_defaults['WeekOfYear']).astype(int)
+            df['DayOfYear'] = df[date_col].dt.dayofyear.fillna(required_features_defaults['DayOfYear']).astype(int)
 
-        # Cyclic encoding for Month and Weekday
-        df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
-        df['Month_cos'] = np.cos(2 * np.pi * df['Month'] / 12)
-        df['Weekday_sin'] = np.sin(2 * np.pi * df['Weekday'] / 7)
-        df['Weekday_cos'] = np.cos(2 * np.pi * df['Weekday'] / 7)
+            # Cyclic encoding for Month and Weekday
+            df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
+            df['Month_cos'] = np.cos(2 * np.pi * df['Month'] / 12)
+            df['Weekday_sin'] = np.sin(2 * np.pi * df['Weekday'] / 7)
+            df['Weekday_cos'] = np.cos(2 * np.pi * df['Weekday'] / 7)
 
-        # Boolean flags for start/end of month, quarter, and year
-        df['Is_Month_Start'] = df[date_col].dt.is_month_start.astype(int)
-        df['Is_Month_End'] = df[date_col].dt.is_month_end.astype(int)
-        df['Is_Quarter_Start'] = df[date_col].dt.is_quarter_start.astype(int)
-        df['Is_Quarter_End'] = df[date_col].dt.is_quarter_end.astype(int)
-        df['Is_Year_Start'] = df[date_col].dt.is_year_start.astype(int)
-        df['Is_Year_End'] = df[date_col].dt.is_year_end.astype(int)
-        
-        df.drop(columns=[date_col], inplace=True, errors='ignore') # Drop original Date column
+            # Boolean flags for start/end of month, quarter, and year
+            df['Is_Month_Start'] = df[date_col].dt.is_month_start.astype(int)
+            df['Is_Month_End'] = df[date_col].dt.is_month_end.astype(int)
+            df['Is_Quarter_Start'] = df[date_col].dt.is_quarter_start.astype(int)
+            df['Is_Quarter_End'] = df[date_col].dt.is_quarter_end.astype(int)
+            df['Is_Year_Start'] = df[date_col].dt.is_year_start.astype(int)
+            df['Is_Year_End'] = df[date_col].dt.is_year_end.astype(int)
+            
+            df.drop(columns=[date_col], inplace=True, errors='ignore') # Drop original Date column
+            print(f"Derived date features: Year={df['Year'].iloc[0]}, Month={df['Month'].iloc[0]}, WeekOfYear={df['WeekOfYear'].iloc[0]}")
+        except Exception as e:
+            print(f"Error during date feature engineering: {e}")
+            traceback.print_exc()
+            print("Proceeding with default date features due to error.")
+            # Set all date-related columns to defaults if an error occurred during parsing or derivation
+            for f in ['Year', 'Month', 'Day', 'Weekday', 'WeekOfYear', 'DayOfYear',
+                      'Month_sin', 'Month_cos', 'Weekday_sin', 'Weekday_cos',
+                      'Is_Month_Start', 'Is_Month_End', 'Is_Quarter_Start', 'Is_Quarter_End',
+                      'Is_Year_Start', 'Is_Year_End']:
+                if f not in df.columns:
+                    df[f] = required_features_defaults.get(f, 0) # Use 0 as a fallback default
+            
+            if date_col in df.columns:
+                df.drop(columns=[date_col], inplace=True, errors='ignore')
+
     else:
-        print("No 'Date' column found, using default date features and cyclic/boolean values")
+        print("No 'Date' column found, using default date features and cyclic/boolean values.")
         # Defaults for date components are already set at the beginning of the function
+        # No need to drop date_col as it was never present
             
     # Clean numeric columns (price, rating related, and Weekly_Sales)
     for col in ['discounted_price', 'actual_price', 'discount_percentage', 'rating', 'Weekly_Sales']:
@@ -237,15 +264,17 @@ async def predict(request: Request, file: UploadFile = File(None)):
 
     try:
         # ---------- 1) Obtain dataframe either from upload or from URL ----------
+        print("Attempting to load data...")
         if file is not None:
             # Received multipart upload
-            print("Received multipart file upload")
+            print(f"Received multipart file upload: {file.filename}")
             df = pd.read_csv(file.file)
         else:
             # Try reading JSON body for file_url
             try:
                 body = await request.json()
-            except Exception:
+            except Exception as json_err:
+                print(f"Could not parse JSON body: {json_err}")
                 body = {}
             file_url = body.get("file_url") if isinstance(body, dict) else None
             if not file_url:
@@ -258,8 +287,7 @@ async def predict(request: Request, file: UploadFile = File(None)):
             if csv_resp.status_code != 200:
                 raise HTTPException(status_code=400, detail=f"Failed to download CSV from URL (status {csv_resp.status_code})")
             df = pd.read_csv(io.StringIO(csv_resp.text))
-
-        print(f"Loaded input CSV with {len(df)} rows and columns: {list(df.columns)}")
+        print(f"Successfully loaded input data with {len(df)} rows and columns: {list(df.columns)}")
 
         # ---------- 2) Save original date and actual_price columns for output ----------
         # date candidates
@@ -290,9 +318,15 @@ async def predict(request: Request, file: UploadFile = File(None)):
         else:
             actual_prices = [None] * len(df)
 
+        print(f"Original dates captured: {original_dates.iloc[0] if original_dates is not None and not original_dates.empty else 'N/A'}")
+        print(f"Actual prices captured: {actual_prices[0] if actual_prices else 'N/A'}")
+
 
         # ---------- 3) Preprocess ----------
+        print("Starting preprocessing with preprocess_optional_engineered_features...")
         df_processed = preprocess_optional_engineered_features(df.copy()) # Pass a copy to avoid modifying original df for actual_prices/dates
+        print(f"DataFrame after preprocessing (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
+
 
         # ---------- 4) Apply label encoders ----------
         # encoders expected to be a dict: { column_name: encoder_obj }
@@ -315,10 +349,13 @@ async def predict(request: Request, file: UploadFile = File(None)):
                     df_processed[col] = 0
                     print(f"Column {col} not found in processed data, set to default value 0 for encoding.")
 
+        print(f"DataFrame after label encoding (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
+
         # Ensure all columns are numeric after encoding
         for col in df_processed.columns:
-            df_processed[col] = pd.to_numeric(df[col], errors='coerce').fillna(0) # IMPORTANT: Use original df[col] for numeric conversion here
-
+            # IMPORTANT: Use df_processed[col] here, not df[col] as df is the original
+            df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce').fillna(0)
+            
         # ---------- 5) Match training column order ----------
         if feature_columns:
             # Add any missing columns that the model expects, fill with 0
@@ -333,6 +370,8 @@ async def predict(request: Request, file: UploadFile = File(None)):
             print(f"Reordered columns to match training: {list(df_processed.columns)}")
         else:
             raise ValueError("Feature columns not loaded. Cannot match input to model.")
+
+        print(f"DataFrame ready for prediction (shape: {df_processed.shape}, columns: {list(df_processed.columns)})")
 
         # ---------- 6) Predict ----------
         predictions = model.predict(df_processed)
