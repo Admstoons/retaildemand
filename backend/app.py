@@ -1,6 +1,7 @@
 # fastapi_app.py
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import pandas as pd
 import joblib
 import io
@@ -18,7 +19,6 @@ def load_from_url(url):
     resp.raise_for_status()
     return joblib.load(io.BytesIO(resp.content))
 
-# Unpack the bundle (model + encoders + scaler)
 bundle = load_from_url(MODEL_URL)
 model = bundle["model"]
 encoders = bundle.get("encoders", {})
@@ -38,54 +38,70 @@ app.add_middleware(
 )
 
 # =========================
-# Prediction endpoint
+# Pydantic model for URL input
 # =========================
-@app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    try:
-        # Load dataset
-        contents = await file.read()
-        df = pd.read_csv(io.BytesIO(contents))
+class UrlInput(BaseModel):
+    csv_url: str
 
-        # === Apply SAME preprocessing as training ===
-        # Categorical encoding
-        for col, encoder in encoders.items():
-            if col in df.columns:
-                df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
+# =========================
+# Common prediction function
+# =========================
+def run_prediction(df: pd.DataFrame):
+    # Apply SAME preprocessing as training
+    for col, encoder in encoders.items():
+        if col in df.columns:
+            df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
 
-        # Lag features / rolling mean (example)
-        if "sales" in df.columns:
-            df["lag_1"] = df["sales"].shift(1).fillna(0)
-            df["rolling_3"] = df["sales"].rolling(window=3).mean().fillna(0)
+    if "sales" in df.columns:
+        df["lag_1"] = df["sales"].shift(1).fillna(0)
+        df["rolling_3"] = df["sales"].rolling(window=3).mean().fillna(0)
 
-        # Scaling (if scaler exists)
-        if scaler:
-            df[df.columns] = scaler.transform(df[df.columns])
+    if scaler:
+        df[df.columns] = scaler.transform(df[df.columns])
 
-        # Ensure correct feature order
-        expected_features = model.get_booster().feature_names
-        X = df[expected_features]
+    expected_features = model.get_booster().feature_names
+    X = df[expected_features]
 
-        # Predictions
-        preds = model.predict(X)
+    preds = model.predict(X)
 
-        # Metrics (if ground truth available)
-        metrics = {}
-        if "sales" in df.columns:  # your target column
-            y_true = df["sales"].values
-            metrics = {
-                "mae": float(mean_absolute_error(y_true, preds)),
-                "mse": float(mean_squared_error(y_true, preds)),
-                "rmse": float(np.sqrt(mean_squared_error(y_true, preds))),
-                "r2": float(r2_score(y_true, preds)),
-                "mape": float(mean_absolute_percentage_error(y_true, preds) * 100),
-            }
-
-        return {
-            "total_predictions": len(preds),
-            "predictions": preds.tolist(),
-            "performance_metrics": metrics,
+    # Metrics
+    metrics = {}
+    if "sales" in df.columns:
+        y_true = df["sales"].values
+        metrics = {
+            "mae": float(mean_absolute_error(y_true, preds)),
+            "mse": float(mean_squared_error(y_true, preds)),
+            "rmse": float(np.sqrt(mean_squared_error(y_true, preds))),
+            "r2": float(r2_score(y_true, preds)),
+            "mape": float(mean_absolute_percentage_error(y_true, preds) * 100),
         }
 
+    return {
+        "total_predictions": len(preds),
+        "predictions": preds.tolist(),
+        "performance_metrics": metrics,
+    }
+
+# =========================
+# Endpoints
+# =========================
+
+@app.post("/predict/file")
+async def predict_file(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        df = pd.read_csv(io.BytesIO(contents))
+        return run_prediction(df)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/predict/url")
+async def predict_url(input_data: UrlInput):
+    try:
+        resp = requests.get(input_data.csv_url)
+        resp.raise_for_status()
+        df = pd.read_csv(io.BytesIO(resp.content))
+        return run_prediction(df)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
