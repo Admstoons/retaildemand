@@ -55,7 +55,8 @@ def preprocess_features(df: pd.DataFrame):
         else:
             raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
 
-    df["Date"] = pd.to_datetime(df["Date"])
+    # Convert Date column with dayfirst=True for DD-MM-YYYY format
+    df["Date"] = pd.to_datetime(df["Date"], infer_datetime_format=True, dayfirst=True)
     df = df.sort_values("Date").reset_index(drop=True)
 
     # Time-based features
