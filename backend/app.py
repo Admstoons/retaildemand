@@ -8,9 +8,9 @@ import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
 
 # Load model + preprocessing objects
-model = joblib.load("xgb_model_with_encoders.pkl")
-encoders = joblib.load("encoders.pkl")   # save these from training
-scaler = joblib.load("scaler.pkl")       # if you used scaling
+model = joblib.load(""https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model_with_encoders.pkl"")
+encoders = joblib.load(""https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model_with_encoders.pkl"")   # save these from training
+scaler = joblib.load(""https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model_with_encoders.pkl"")       # if you used scaling
 
 app = FastAPI()
 
