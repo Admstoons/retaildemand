@@ -5,13 +5,28 @@ import pandas as pd
 import joblib
 import io
 import numpy as np
+import requests
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
 
-# Load model + preprocessing objects
-model = joblib.load(""https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model_with_encoders.pkl"")
-encoders = joblib.load(""https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model_with_encoders.pkl"")   # save these from training
-scaler = joblib.load(""https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model_with_encoders.pkl"")       # if you used scaling
+# =========================
+# Load bundled model
+# =========================
+MODEL_URL = "https://tjdagsnqjofpssegmczw.supabase.co/storage/v1/object/public/models/xgb_model_with_encoders.pkl"
 
+def load_from_url(url):
+    resp = requests.get(url)
+    resp.raise_for_status()
+    return joblib.load(io.BytesIO(resp.content))
+
+# Unpack the bundle (model + encoders + scaler)
+bundle = load_from_url(MODEL_URL)
+model = bundle["model"]
+encoders = bundle.get("encoders", {})
+scaler = bundle.get("scaler", None)
+
+# =========================
+# FastAPI setup
+# =========================
 app = FastAPI()
 
 app.add_middleware(
@@ -22,6 +37,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# =========================
+# Prediction endpoint
+# =========================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
@@ -30,30 +48,30 @@ async def predict(file: UploadFile = File(...)):
         df = pd.read_csv(io.BytesIO(contents))
 
         # === Apply SAME preprocessing as training ===
-        # Example: categorical encoding
+        # Categorical encoding
         for col, encoder in encoders.items():
             if col in df.columns:
                 df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
 
-        # Example: lag features / rolling mean
+        # Lag features / rolling mean (example)
         if "sales" in df.columns:
             df["lag_1"] = df["sales"].shift(1).fillna(0)
             df["rolling_3"] = df["sales"].rolling(window=3).mean().fillna(0)
 
-        # Example: scaling
+        # Scaling (if scaler exists)
         if scaler:
             df[df.columns] = scaler.transform(df[df.columns])
 
-        # Ensure same feature order
+        # Ensure correct feature order
         expected_features = model.get_booster().feature_names
         X = df[expected_features]
 
-        # Make predictions
+        # Predictions
         preds = model.predict(X)
 
-        # Compute metrics (if actual values available)
+        # Metrics (if ground truth available)
         metrics = {}
-        if "sales" in df.columns:  # replace with your target column
+        if "sales" in df.columns:  # your target column
             y_true = df["sales"].values
             metrics = {
                 "mae": float(mean_absolute_error(y_true, preds)),
