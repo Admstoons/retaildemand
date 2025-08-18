@@ -81,19 +81,24 @@ def preprocess_features(df: pd.DataFrame):
     df["Is_Year_Start"] = df["Date"].dt.is_year_start.astype(int)
     df["Is_Year_End"] = df["Date"].dt.is_year_end.astype(int)
 
-    # Lag & rolling features (require "sales")
-    if "sales" in df.columns:
-        df["lag_1"] = df["sales"].shift(1).fillna(0)
-        df["lag_2"] = df["sales"].shift(2).fillna(0)
-        df["lag_3"] = df["sales"].shift(3).fillna(0)
-        df["lag_7"] = df["sales"].shift(7).fillna(0)
+    # Lag & rolling features (require "Weekly_Sales")
+    lag_cols = ["lag_1","lag_2","lag_3","lag_7"]
+    roll_cols = ["rolling_mean_3","rolling_mean_7","rolling_mean_14","rolling_mean_28","rolling_std_7"]
 
-        df["rolling_mean_3"] = df["sales"].rolling(window=3).mean().fillna(0)
-        df["rolling_mean_7"] = df["sales"].rolling(window=7).mean().fillna(0)
-        df["rolling_mean_14"] = df["sales"].rolling(window=14).mean().fillna(0)
-        df["rolling_mean_28"] = df["sales"].rolling(window=28).mean().fillna(0)
+    if "Weekly_Sales" in df.columns:
+        df["lag_1"] = df["Weekly_Sales"].shift(1).fillna(0)
+        df["lag_2"] = df["Weekly_Sales"].shift(2).fillna(0)
+        df["lag_3"] = df["Weekly_Sales"].shift(3).fillna(0)
+        df["lag_7"] = df["Weekly_Sales"].shift(7).fillna(0)
 
-        df["rolling_std_7"] = df["sales"].rolling(window=7).std().fillna(0)
+        df["rolling_mean_3"] = df["Weekly_Sales"].rolling(window=3).mean().fillna(0)
+        df["rolling_mean_7"] = df["Weekly_Sales"].rolling(window=7).mean().fillna(0)
+        df["rolling_mean_14"] = df["Weekly_Sales"].rolling(window=14).mean().fillna(0)
+        df["rolling_mean_28"] = df["Weekly_Sales"].rolling(window=28).mean().fillna(0)
+        df["rolling_std_7"] = df["Weekly_Sales"].rolling(window=7).std().fillna(0)
+    else:
+        for col in lag_cols + roll_cols:
+            df[col] = 0
 
     return df
 
@@ -101,7 +106,6 @@ def preprocess_features(df: pd.DataFrame):
 # Common prediction function
 # =========================
 def run_prediction(df: pd.DataFrame):
-    # Preprocess
     df = preprocess_features(df)
 
     # Apply encoders
@@ -113,16 +117,19 @@ def run_prediction(df: pd.DataFrame):
     if scaler:
         df[df.columns] = scaler.transform(df[df.columns])
 
-    # Match training features
+    # Ensure all expected features exist
     expected_features = model.get_booster().feature_names
-    X = df[expected_features]
+    for col in expected_features:
+        if col not in df.columns:
+            df[col] = 0
 
+    X = df[expected_features]
     preds = model.predict(X)
 
     # Metrics if ground truth exists
     metrics = {}
-    if "sales" in df.columns:
-        y_true = df["sales"].values
+    if "Weekly_Sales" in df.columns:
+        y_true = df["Weekly_Sales"].values
         metrics = {
             "mae": float(mean_absolute_error(y_true, preds)),
             "mse": float(mean_squared_error(y_true, preds)),
@@ -148,7 +155,6 @@ async def predict_file(file: UploadFile = File(...)):
         return run_prediction(df)
     except Exception as e:
         return {"error": str(e), "trace": traceback.format_exc()}
-
 
 @app.post("/predict/url")
 async def predict_url(input_data: UrlInput):
