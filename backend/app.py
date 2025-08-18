@@ -138,9 +138,14 @@ def run_prediction(df: pd.DataFrame):
             "mape": float(mean_absolute_percentage_error(y_true, preds) * 100),
         }
 
+    # Prepare output with actual and predicted sales
+    output_df = df[["Date"]].copy()
+    output_df["Actual_Weekly_Sales"] = df["Weekly_Sales"] if "Weekly_Sales" in df.columns else None
+    output_df["Predicted_Weekly_Sales"] = preds
+
     return {
         "total_predictions": len(preds),
-        "predictions": preds.tolist(),
+        "predictions": output_df.to_dict(orient="records"),
         "performance_metrics": metrics,
     }
 
