@@ -8,6 +8,7 @@ import io
 import numpy as np
 import requests
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
+import traceback
 
 # =========================
 # Load bundled model
@@ -44,27 +45,80 @@ class UrlInput(BaseModel):
     csv_url: str
 
 # =========================
+# Feature engineering function
+# =========================
+def preprocess_features(df: pd.DataFrame):
+    # Ensure Date column exists
+    if "Date" not in df.columns:
+        if {"Year", "Month", "Day"}.issubset(df.columns):
+            df["Date"] = pd.to_datetime(df[["Year", "Month", "Day"]])
+        else:
+            raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date").reset_index(drop=True)
+
+    # Time-based features
+    df["Year"] = df["Date"].dt.year
+    df["Month"] = df["Date"].dt.month
+    df["Day"] = df["Date"].dt.day
+    df["Weekday"] = df["Date"].dt.weekday
+    df["WeekOfYear"] = df["Date"].dt.isocalendar().week.astype(int)
+    df["DayOfYear"] = df["Date"].dt.dayofyear
+
+    # Cyclical encoding
+    df["Month_sin"] = np.sin(2 * np.pi * df["Month"] / 12)
+    df["Month_cos"] = np.cos(2 * np.pi * df["Month"] / 12)
+    df["Weekday_sin"] = np.sin(2 * np.pi * df["Weekday"] / 7)
+    df["Weekday_cos"] = np.cos(2 * np.pi * df["Weekday"] / 7)
+
+    # Period markers
+    df["Is_Month_Start"] = df["Date"].dt.is_month_start.astype(int)
+    df["Is_Month_End"] = df["Date"].dt.is_month_end.astype(int)
+    df["Is_Quarter_Start"] = df["Date"].dt.is_quarter_start.astype(int)
+    df["Is_Quarter_End"] = df["Date"].dt.is_quarter_end.astype(int)
+    df["Is_Year_Start"] = df["Date"].dt.is_year_start.astype(int)
+    df["Is_Year_End"] = df["Date"].dt.is_year_end.astype(int)
+
+    # Lag & rolling features (require "sales")
+    if "sales" in df.columns:
+        df["lag_1"] = df["sales"].shift(1).fillna(0)
+        df["lag_2"] = df["sales"].shift(2).fillna(0)
+        df["lag_3"] = df["sales"].shift(3).fillna(0)
+        df["lag_7"] = df["sales"].shift(7).fillna(0)
+
+        df["rolling_mean_3"] = df["sales"].rolling(window=3).mean().fillna(0)
+        df["rolling_mean_7"] = df["sales"].rolling(window=7).mean().fillna(0)
+        df["rolling_mean_14"] = df["sales"].rolling(window=14).mean().fillna(0)
+        df["rolling_mean_28"] = df["sales"].rolling(window=28).mean().fillna(0)
+
+        df["rolling_std_7"] = df["sales"].rolling(window=7).std().fillna(0)
+
+    return df
+
+# =========================
 # Common prediction function
 # =========================
 def run_prediction(df: pd.DataFrame):
-    # Apply SAME preprocessing as training
+    # Preprocess
+    df = preprocess_features(df)
+
+    # Apply encoders
     for col, encoder in encoders.items():
         if col in df.columns:
             df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
 
-    if "sales" in df.columns:
-        df["lag_1"] = df["sales"].shift(1).fillna(0)
-        df["rolling_3"] = df["sales"].rolling(window=3).mean().fillna(0)
-
+    # Apply scaler
     if scaler:
         df[df.columns] = scaler.transform(df[df.columns])
 
+    # Match training features
     expected_features = model.get_booster().feature_names
     X = df[expected_features]
 
     preds = model.predict(X)
 
-    # Metrics
+    # Metrics if ground truth exists
     metrics = {}
     if "sales" in df.columns:
         y_true = df["sales"].values
@@ -85,18 +139,17 @@ def run_prediction(df: pd.DataFrame):
 # =========================
 # Endpoints
 # =========================
-
-@app.post("/predict/file")
+@app.post("/predict")
 async def predict_file(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents))
         return run_prediction(df)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return {"error": str(e), "trace": traceback.format_exc()}
 
 
-@app.post("/predict/url")
+@app.post("/predict")
 async def predict_url(input_data: UrlInput):
     try:
         resp = requests.get(input_data.csv_url)
@@ -104,4 +157,4 @@ async def predict_url(input_data: UrlInput):
         df = pd.read_csv(io.BytesIO(resp.content))
         return run_prediction(df)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return {"error": str(e), "trace": traceback.format_exc()}
