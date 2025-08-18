@@ -139,7 +139,7 @@ def run_prediction(df: pd.DataFrame):
 # =========================
 # Endpoints
 # =========================
-@app.post("/predict")
+@app.post("/predict/file")
 async def predict_file(file: UploadFile = File(...)):
     try:
         contents = await file.read()
@@ -149,7 +149,7 @@ async def predict_file(file: UploadFile = File(...)):
         return {"error": str(e), "trace": traceback.format_exc()}
 
 
-@app.post("/predict")
+@app.post("/predict/url")
 async def predict_url(input_data: UrlInput):
     try:
         resp = requests.get(input_data.csv_url)
