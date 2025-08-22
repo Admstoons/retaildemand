@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
@@ -21,7 +21,7 @@ def load_from_url(url):
 
 bundle = load_from_url(MODEL_URL)
 model = bundle["model"]
-encoders = bundle.get("encoders", {})
+encoders = bundle.get("encoders", {}) or {}  # ensure dict
 scaler = bundle.get("scaler", None)
 
 # =========================
@@ -54,9 +54,9 @@ def preprocess_features(df: pd.DataFrame):
         else:
             raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
 
-    # ✅ Robust Date Parsing (handles multiple formats)
-    df["Date"] = pd.to_datetime(df["Date"], format="mixed", errors="coerce")
-    df = df.dropna(subset=["Date"])  # drop rows with unparseable dates
+    # ✅ Robust Date Parsing
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", infer_datetime_format=True)
+    df = df.dropna(subset=["Date"])  # drop rows with invalid dates
     df = df.sort_values("Date").reset_index(drop=True)
 
     # Time-based features
@@ -108,10 +108,13 @@ def preprocess_features(df: pd.DataFrame):
 def run_prediction(df: pd.DataFrame):
     df = preprocess_features(df)
 
-    # Apply encoders
+    # Apply encoders safely
     for col, encoder in encoders.items():
-        if col in df.columns:
-            df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
+        if encoder is not None and col in df.columns:
+            df[col] = df[col].astype(str).fillna("Unknown")
+            # Handle unseen categories
+            df[col] = df[col].apply(lambda x: x if x in encoder.classes_ else "Unknown")
+            df[col] = encoder.transform(df[col])
 
     # Apply scaler
     if scaler:
@@ -138,7 +141,7 @@ def run_prediction(df: pd.DataFrame):
             "mape": float(mean_absolute_percentage_error(y_true, preds) * 100),
         }
 
-    # Prepare output with actual and predicted sales
+    # Prepare output
     output_df = df[["Date"]].copy()
     output_df["Actual_Weekly_Sales"] = df["Weekly_Sales"] if "Weekly_Sales" in df.columns else None
     output_df["Predicted_Weekly_Sales"] = preds
