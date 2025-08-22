@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
@@ -21,7 +21,7 @@ def load_from_url(url):
 
 bundle = load_from_url(MODEL_URL)
 model = bundle["model"]
-encoders = bundle.get("encoders", {}) or {}  # ensure dict
+encoders = bundle.get("encoders", {})
 scaler = bundle.get("scaler", None)
 
 # =========================
@@ -54,9 +54,10 @@ def preprocess_features(df: pd.DataFrame):
         else:
             raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
 
-    # ✅ Robust Date Parsing
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", infer_datetime_format=True)
-    df = df.dropna(subset=["Date"])  # drop rows with invalid dates
+    # 🔹 Robust Date parsing
+    df["Date"] = pd.to_datetime(
+        df["Date"], errors="coerce", dayfirst=True, infer_datetime_format=True
+    )
     df = df.sort_values("Date").reset_index(drop=True)
 
     # Time-based features
@@ -86,16 +87,27 @@ def preprocess_features(df: pd.DataFrame):
     roll_cols = ["rolling_mean_3","rolling_mean_7","rolling_mean_14","rolling_mean_28","rolling_std_7"]
 
     if "Weekly_Sales" in df.columns:
+        # 🔹 Clean Weekly_Sales (remove commas, $, spaces)
+        df["Weekly_Sales"] = (
+            df["Weekly_Sales"].astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace("$", "", regex=False)
+            .str.strip()
+        )
+        df["Weekly_Sales"] = pd.to_numeric(df["Weekly_Sales"], errors="coerce").fillna(0)
+
+        # Lags
         df["lag_1"] = df["Weekly_Sales"].shift(1).fillna(0)
         df["lag_2"] = df["Weekly_Sales"].shift(2).fillna(0)
         df["lag_3"] = df["Weekly_Sales"].shift(3).fillna(0)
         df["lag_7"] = df["Weekly_Sales"].shift(7).fillna(0)
 
-        df["rolling_mean_3"] = df["Weekly_Sales"].rolling(window=3).mean().fillna(0)
-        df["rolling_mean_7"] = df["Weekly_Sales"].rolling(window=7).mean().fillna(0)
-        df["rolling_mean_14"] = df["Weekly_Sales"].rolling(window=14).mean().fillna(0)
-        df["rolling_mean_28"] = df["Weekly_Sales"].rolling(window=28).mean().fillna(0)
-        df["rolling_std_7"] = df["Weekly_Sales"].rolling(window=7).std().fillna(0)
+        # Rollings
+        df["rolling_mean_3"] = df["Weekly_Sales"].rolling(window=3, min_periods=1).mean()
+        df["rolling_mean_7"] = df["Weekly_Sales"].rolling(window=7, min_periods=1).mean()
+        df["rolling_mean_14"] = df["Weekly_Sales"].rolling(window=14, min_periods=1).mean()
+        df["rolling_mean_28"] = df["Weekly_Sales"].rolling(window=28, min_periods=1).mean()
+        df["rolling_std_7"] = df["Weekly_Sales"].rolling(window=7, min_periods=1).std().fillna(0)
     else:
         for col in lag_cols + roll_cols:
             df[col] = 0
@@ -108,13 +120,13 @@ def preprocess_features(df: pd.DataFrame):
 def run_prediction(df: pd.DataFrame):
     df = preprocess_features(df)
 
-    # Apply encoders safely
+    # Apply encoders
     for col, encoder in encoders.items():
-        if encoder is not None and col in df.columns:
-            df[col] = df[col].astype(str).fillna("Unknown")
-            # Handle unseen categories
-            df[col] = df[col].apply(lambda x: x if x in encoder.classes_ else "Unknown")
-            df[col] = encoder.transform(df[col])
+        if col in df.columns:
+            try:
+                df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
+            except Exception:
+                df[col] = 0  # fallback if unseen labels appear
 
     # Apply scaler
     if scaler:
@@ -141,7 +153,7 @@ def run_prediction(df: pd.DataFrame):
             "mape": float(mean_absolute_percentage_error(y_true, preds) * 100),
         }
 
-    # Prepare output
+    # Prepare output with actual and predicted sales
     output_df = df[["Date"]].copy()
     output_df["Actual_Weekly_Sales"] = df["Weekly_Sales"] if "Weekly_Sales" in df.columns else None
     output_df["Predicted_Weekly_Sales"] = preds
