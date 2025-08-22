@@ -6,7 +6,7 @@ import joblib
 import io
 import numpy as np
 import requests
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import traceback
 
 # =========================
@@ -44,37 +44,40 @@ class UrlInput(BaseModel):
     csv_url: str
 
 # =========================
-# Feature engineering function
+# Feature engineering function (ROBUST DATE HANDLING)
 # =========================
 def preprocess_features(df: pd.DataFrame):
-    # Ensure Date column exists
-    if "Date" not in df.columns:
-        if {"Year", "Month", "Day"}.issubset(df.columns):
-            df["Date"] = pd.to_datetime(df[["Year", "Month", "Day"]], errors="coerce")
-        else:
-            raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
+    df = df.copy()
 
-    # 🔹 Robust Date parsing
-    df["Date"] = pd.to_datetime(
-        df["Date"], errors="coerce", dayfirst=True, infer_datetime_format=True
-    )
+    # ✅ Robust Date parsing
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", infer_datetime_format=True)
+    elif {"Year", "Month", "Day"}.issubset(df.columns):
+        df["Date"] = pd.to_datetime(df[["Year", "Month", "Day"]], errors="coerce")
+    else:
+        raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
+
+    # Fill invalid dates
+    df["Date"] = df["Date"].fillna(pd.to_datetime("2000-01-01"))
+
+    # Sort by date
     df = df.sort_values("Date").reset_index(drop=True)
 
-    # Time-based features
-    df["Year"] = df["Date"].dt.year
-    df["Month"] = df["Date"].dt.month
-    df["Day"] = df["Date"].dt.day
-    df["Weekday"] = df["Date"].dt.weekday
-    df["WeekOfYear"] = df["Date"].dt.isocalendar().week.astype(int)
-    df["DayOfYear"] = df["Date"].dt.dayofyear
+    # ✅ Time-based features (safe with Int64 type)
+    df["Year"] = df["Date"].dt.year.astype("Int64")
+    df["Month"] = df["Date"].dt.month.astype("Int64")
+    df["Day"] = df["Date"].dt.day.astype("Int64")
+    df["Weekday"] = df["Date"].dt.weekday.astype("Int64")
+    df["WeekOfYear"] = df["Date"].dt.isocalendar().week.astype("Int64")
+    df["DayOfYear"] = df["Date"].dt.dayofyear.astype("Int64")
 
-    # Cyclical encoding
-    df["Month_sin"] = np.sin(2 * np.pi * df["Month"] / 12)
-    df["Month_cos"] = np.cos(2 * np.pi * df["Month"] / 12)
-    df["Weekday_sin"] = np.sin(2 * np.pi * df["Weekday"] / 7)
-    df["Weekday_cos"] = np.cos(2 * np.pi * df["Weekday"] / 7)
+    # ✅ Cyclical encoding
+    df["Month_sin"] = np.sin(2 * np.pi * df["Month"].fillna(0) / 12)
+    df["Month_cos"] = np.cos(2 * np.pi * df["Month"].fillna(0) / 12)
+    df["Weekday_sin"] = np.sin(2 * np.pi * df["Weekday"].fillna(0) / 7)
+    df["Weekday_cos"] = np.cos(2 * np.pi * df["Weekday"].fillna(0) / 7)
 
-    # Period markers
+    # ✅ Period markers
     df["Is_Month_Start"] = df["Date"].dt.is_month_start.astype(int)
     df["Is_Month_End"] = df["Date"].dt.is_month_end.astype(int)
     df["Is_Quarter_Start"] = df["Date"].dt.is_quarter_start.astype(int)
@@ -82,35 +85,36 @@ def preprocess_features(df: pd.DataFrame):
     df["Is_Year_Start"] = df["Date"].dt.is_year_start.astype(int)
     df["Is_Year_End"] = df["Date"].dt.is_year_end.astype(int)
 
-    # Lag & rolling features (require "Weekly_Sales")
+    # ✅ Lag & rolling features
     lag_cols = ["lag_1","lag_2","lag_3","lag_7"]
     roll_cols = ["rolling_mean_3","rolling_mean_7","rolling_mean_14","rolling_mean_28","rolling_std_7"]
 
     if "Weekly_Sales" in df.columns:
-        # 🔹 Clean Weekly_Sales (remove commas, $, spaces)
-        df["Weekly_Sales"] = (
-            df["Weekly_Sales"].astype(str)
-            .str.replace(",", "", regex=False)
-            .str.replace("$", "", regex=False)
-            .str.strip()
-        )
         df["Weekly_Sales"] = pd.to_numeric(df["Weekly_Sales"], errors="coerce").fillna(0)
 
-        # Lags
         df["lag_1"] = df["Weekly_Sales"].shift(1).fillna(0)
         df["lag_2"] = df["Weekly_Sales"].shift(2).fillna(0)
         df["lag_3"] = df["Weekly_Sales"].shift(3).fillna(0)
         df["lag_7"] = df["Weekly_Sales"].shift(7).fillna(0)
 
-        # Rollings
-        df["rolling_mean_3"] = df["Weekly_Sales"].rolling(window=3, min_periods=1).mean()
-        df["rolling_mean_7"] = df["Weekly_Sales"].rolling(window=7, min_periods=1).mean()
-        df["rolling_mean_14"] = df["Weekly_Sales"].rolling(window=14, min_periods=1).mean()
-        df["rolling_mean_28"] = df["Weekly_Sales"].rolling(window=28, min_periods=1).mean()
-        df["rolling_std_7"] = df["Weekly_Sales"].rolling(window=7, min_periods=1).std().fillna(0)
+        df["rolling_mean_3"] = df["Weekly_Sales"].rolling(window=3).mean().fillna(0)
+        df["rolling_mean_7"] = df["Weekly_Sales"].rolling(window=7).mean().fillna(0)
+        df["rolling_mean_14"] = df["Weekly_Sales"].rolling(window=14).mean().fillna(0)
+        df["rolling_mean_28"] = df["Weekly_Sales"].rolling(window=28).mean().fillna(0)
+        df["rolling_std_7"] = df["Weekly_Sales"].rolling(window=7).std().fillna(0)
     else:
         for col in lag_cols + roll_cols:
             df[col] = 0
+
+    # ✅ Final safe fill
+    num_cols = df.select_dtypes(include=["number"]).columns
+    cat_cols = df.select_dtypes(include=["object"]).columns
+    date_cols = df.select_dtypes(include=["datetime"]).columns
+
+    df[num_cols] = df[num_cols].fillna(0)
+    df[cat_cols] = df[cat_cols].fillna("Unknown")
+    if len(date_cols) > 0:
+        df[date_cols] = df[date_cols].fillna(pd.to_datetime("2000-01-01"))
 
     return df
 
@@ -122,11 +126,13 @@ def run_prediction(df: pd.DataFrame):
 
     # Apply encoders
     for col, encoder in encoders.items():
-        if col in df.columns:
-            try:
-                df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
-            except Exception:
-                df[col] = 0  # fallback if unseen labels appear
+        if col in df.columns and encoder:
+            df[col] = df[col].astype(str).fillna("Missing")
+            df[col] = np.where(
+                df[col].isin(encoder.classes_),
+                encoder.transform(df[col]),
+                -1  # unseen categories
+            )
 
     # Apply scaler
     if scaler:
@@ -150,10 +156,9 @@ def run_prediction(df: pd.DataFrame):
             "mse": float(mean_squared_error(y_true, preds)),
             "rmse": float(np.sqrt(mean_squared_error(y_true, preds))),
             "r2": float(r2_score(y_true, preds)),
-            "mape": float(mean_absolute_percentage_error(y_true, preds) * 100),
         }
 
-    # Prepare output with actual and predicted sales
+    # Output with dates
     output_df = df[["Date"]].copy()
     output_df["Actual_Weekly_Sales"] = df["Weekly_Sales"] if "Weekly_Sales" in df.columns else None
     output_df["Predicted_Weekly_Sales"] = preds
