@@ -1,3 +1,4 @@
+# fastapi_app.py
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -44,54 +45,79 @@ class UrlInput(BaseModel):
     csv_url: str
 
 # =========================
-# Feature engineering function (ROBUST DATE HANDLING)
+# Robust preprocessing function
 # =========================
 def preprocess_features(df: pd.DataFrame):
     df = df.copy()
+    
+    # -------------------------
+    # Identify Date column
+    # -------------------------
+    date_column = None
+    for col in df.columns:
+        if col.lower() in ['date', 'invoicedate', 'unnamed: 0', 'unnamed_column'] or \
+           df[col].astype(str).str.match(r'\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}').any() or \
+           df[col].astype(str).str.match(r'\d{4}-\d{2}-\d{2}').any() or \
+           df[col].astype(str).str.match(r'\d{2}-\d{2}-\d{4}').any():
+            date_column = col
+            break
 
-    # ✅ Robust Date parsing
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", infer_datetime_format=True)
-    elif {"Year", "Month", "Day"}.issubset(df.columns):
-        df["Date"] = pd.to_datetime(df[["Year", "Month", "Day"]], errors="coerce")
+    if date_column:
+        df = df.rename(columns={date_column: 'Date'})
     else:
-        raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
+        if {"Year", "Month", "Day"}.issubset(df.columns):
+            df["Date"] = pd.to_datetime(df[["Year","Month","Day"]], errors="coerce")
+        else:
+            raise ValueError("CSV must contain 'Date' or Year/Month/Day columns.")
 
-    # Fill invalid dates
-    df["Date"] = df["Date"].fillna(pd.to_datetime("2000-01-01"))
+    # -------------------------
+    # Robust Date Parsing
+    # -------------------------
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    date_formats = [
+        "%d/%m/%Y %H:%M", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S",
+        "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d",
+        "%Y-%m-%dT%H:%M:%S.%f"
+    ]
+    for fmt in date_formats:
+        mask = df['Date'].isnull()
+        if mask.any():
+            df.loc[mask, 'Date'] = pd.to_datetime(df.loc[mask, 'Date'], format=fmt, errors='coerce')
 
-    # Sort by date
-    df = df.sort_values("Date").reset_index(drop=True)
+    if df['Date'].isnull().any():
+        df = df.dropna(subset=['Date']).reset_index(drop=True)
 
-    # ✅ Time-based features (safe with Int64 type)
-    df["Year"] = df["Date"].dt.year.astype("Int64")
-    df["Month"] = df["Date"].dt.month.astype("Int64")
-    df["Day"] = df["Date"].dt.day.astype("Int64")
-    df["Weekday"] = df["Date"].dt.weekday.astype("Int64")
-    df["WeekOfYear"] = df["Date"].dt.isocalendar().week.astype("Int64")
-    df["DayOfYear"] = df["Date"].dt.dayofyear.astype("Int64")
+    # -------------------------
+    # Time-based features
+    # -------------------------
+    df['Year'] = df['Date'].dt.year.astype("Int64")
+    df['Month'] = df['Date'].dt.month.astype("Int64")
+    df['Day'] = df['Date'].dt.day.astype("Int64")
+    df['Weekday'] = df['Date'].dt.weekday.astype("Int64")
+    df['WeekOfYear'] = df['Date'].dt.isocalendar().week.astype("Int64")
+    df['DayOfYear'] = df['Date'].dt.dayofyear.astype("Int64")
 
-    # ✅ Cyclical encoding
-    df["Month_sin"] = np.sin(2 * np.pi * df["Month"].fillna(0) / 12)
-    df["Month_cos"] = np.cos(2 * np.pi * df["Month"].fillna(0) / 12)
-    df["Weekday_sin"] = np.sin(2 * np.pi * df["Weekday"].fillna(0) / 7)
-    df["Weekday_cos"] = np.cos(2 * np.pi * df["Weekday"].fillna(0) / 7)
+    # Cyclical features
+    df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
+    df['Month_cos'] = np.cos(2 * np.pi * df['Month'] / 12)
+    df['Weekday_sin'] = np.sin(2 * np.pi * df['Weekday'] / 7)
+    df['Weekday_cos'] = np.cos(2 * np.pi * df['Weekday'] / 7)
 
-    # ✅ Period markers
-    df["Is_Month_Start"] = df["Date"].dt.is_month_start.astype(int)
-    df["Is_Month_End"] = df["Date"].dt.is_month_end.astype(int)
-    df["Is_Quarter_Start"] = df["Date"].dt.is_quarter_start.astype(int)
-    df["Is_Quarter_End"] = df["Date"].dt.is_quarter_end.astype(int)
-    df["Is_Year_Start"] = df["Date"].dt.is_year_start.astype(int)
-    df["Is_Year_End"] = df["Date"].dt.is_year_end.astype(int)
+    # Period markers
+    df['Is_Month_Start'] = df['Date'].dt.is_month_start.astype(int)
+    df['Is_Month_End'] = df['Date'].dt.is_month_end.astype(int)
+    df['Is_Quarter_Start'] = df['Date'].dt.is_quarter_start.astype(int)
+    df['Is_Quarter_End'] = df['Date'].dt.is_quarter_end.astype(int)
+    df['Is_Year_Start'] = df['Date'].dt.is_year_start.astype(int)
+    df['Is_Year_End'] = df['Date'].dt.is_year_end.astype(int)
 
-    # ✅ Lag & rolling features
+    # -------------------------
+    # Lag & rolling features
+    # -------------------------
     lag_cols = ["lag_1","lag_2","lag_3","lag_7"]
     roll_cols = ["rolling_mean_3","rolling_mean_7","rolling_mean_14","rolling_mean_28","rolling_std_7"]
 
     if "Weekly_Sales" in df.columns:
-        df["Weekly_Sales"] = pd.to_numeric(df["Weekly_Sales"], errors="coerce").fillna(0)
-
         df["lag_1"] = df["Weekly_Sales"].shift(1).fillna(0)
         df["lag_2"] = df["Weekly_Sales"].shift(2).fillna(0)
         df["lag_3"] = df["Weekly_Sales"].shift(3).fillna(0)
@@ -106,16 +132,6 @@ def preprocess_features(df: pd.DataFrame):
         for col in lag_cols + roll_cols:
             df[col] = 0
 
-    # ✅ Final safe fill
-    num_cols = df.select_dtypes(include=["number"]).columns
-    cat_cols = df.select_dtypes(include=["object"]).columns
-    date_cols = df.select_dtypes(include=["datetime"]).columns
-
-    df[num_cols] = df[num_cols].fillna(0)
-    df[cat_cols] = df[cat_cols].fillna("Unknown")
-    if len(date_cols) > 0:
-        df[date_cols] = df[date_cols].fillna(pd.to_datetime("2000-01-01"))
-
     return df
 
 # =========================
@@ -126,19 +142,14 @@ def run_prediction(df: pd.DataFrame):
 
     # Apply encoders
     for col, encoder in encoders.items():
-        if col in df.columns and encoder:
-            df[col] = df[col].astype(str).fillna("Missing")
-            df[col] = np.where(
-                df[col].isin(encoder.classes_),
-                encoder.transform(df[col]),
-                -1  # unseen categories
-            )
+        if col in df.columns:
+            df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
 
-    # Apply scaler
+    # Apply scaler if exists
     if scaler:
         df[df.columns] = scaler.transform(df[df.columns])
 
-    # Ensure all expected features exist
+    # Ensure all model features exist
     expected_features = model.get_booster().feature_names
     for col in expected_features:
         if col not in df.columns:
@@ -156,10 +167,11 @@ def run_prediction(df: pd.DataFrame):
             "mse": float(mean_squared_error(y_true, preds)),
             "rmse": float(np.sqrt(mean_squared_error(y_true, preds))),
             "r2": float(r2_score(y_true, preds)),
+            "mape": float(np.mean(np.abs((y_true - preds)/y_true)) * 100),
         }
 
-    # Output with dates
-    output_df = df[["Date"]].copy()
+    # Prepare output with actual and predicted
+    output_df = df.copy()
     output_df["Actual_Weekly_Sales"] = df["Weekly_Sales"] if "Weekly_Sales" in df.columns else None
     output_df["Predicted_Weekly_Sales"] = preds
 
