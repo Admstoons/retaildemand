@@ -1,4 +1,3 @@
-# fastapi_app.py
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -51,12 +50,13 @@ def preprocess_features(df: pd.DataFrame):
     # Ensure Date column exists
     if "Date" not in df.columns:
         if {"Year", "Month", "Day"}.issubset(df.columns):
-            df["Date"] = pd.to_datetime(df[["Year", "Month", "Day"]])
+            df["Date"] = pd.to_datetime(df[["Year", "Month", "Day"]], errors="coerce")
         else:
             raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
 
-    # Convert Date column with dayfirst=True for DD-MM-YYYY format
-    df["Date"] = pd.to_datetime(df["Date"], infer_datetime_format=True, dayfirst=True)
+    # ✅ Robust Date Parsing (handles multiple formats)
+    df["Date"] = pd.to_datetime(df["Date"], format="mixed", errors="coerce")
+    df = df.dropna(subset=["Date"])  # drop rows with unparseable dates
     df = df.sort_values("Date").reset_index(drop=True)
 
     # Time-based features
