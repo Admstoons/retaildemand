@@ -7,7 +7,7 @@ import joblib
 import io
 import numpy as np
 import requests
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
 import traceback
 
 # =========================
@@ -45,75 +45,43 @@ class UrlInput(BaseModel):
     csv_url: str
 
 # =========================
-# Robust preprocessing function
+# Feature engineering function
 # =========================
 def preprocess_features(df: pd.DataFrame):
-    df = df.copy()
-    
-    # -------------------------
-    # Identify Date column
-    # -------------------------
-    date_column = None
-    for col in df.columns:
-        if col.lower() in ['date', 'invoicedate', 'unnamed: 0', 'unnamed_column'] or \
-           df[col].astype(str).str.match(r'\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}').any() or \
-           df[col].astype(str).str.match(r'\d{4}-\d{2}-\d{2}').any() or \
-           df[col].astype(str).str.match(r'\d{2}-\d{2}-\d{4}').any():
-            date_column = col
-            break
-
-    if date_column:
-        df = df.rename(columns={date_column: 'Date'})
-    else:
+    # Ensure Date column exists
+    if "Date" not in df.columns:
         if {"Year", "Month", "Day"}.issubset(df.columns):
-            df["Date"] = pd.to_datetime(df[["Year","Month","Day"]], errors="coerce")
+            df["Date"] = pd.to_datetime(df[["Year", "Month", "Day"]])
         else:
-            raise ValueError("CSV must contain 'Date' or Year/Month/Day columns.")
+            raise ValueError("CSV must contain either 'Date' column or Year/Month/Day columns.")
 
-    # -------------------------
-    # Robust Date Parsing
-    # -------------------------
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    date_formats = [
-        "%d/%m/%Y %H:%M", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S",
-        "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d",
-        "%Y-%m-%dT%H:%M:%S.%f"
-    ]
-    for fmt in date_formats:
-        mask = df['Date'].isnull()
-        if mask.any():
-            df.loc[mask, 'Date'] = pd.to_datetime(df.loc[mask, 'Date'], format=fmt, errors='coerce')
+    # Convert Date column with dayfirst=True for DD-MM-YYYY format
+    df["Date"] = pd.to_datetime(df["Date"], infer_datetime_format=True, dayfirst=True)
+    df = df.sort_values("Date").reset_index(drop=True)
 
-    if df['Date'].isnull().any():
-        df = df.dropna(subset=['Date']).reset_index(drop=True)
-
-    # -------------------------
     # Time-based features
-    # -------------------------
-    df['Year'] = df['Date'].dt.year.astype("Int64")
-    df['Month'] = df['Date'].dt.month.astype("Int64")
-    df['Day'] = df['Date'].dt.day.astype("Int64")
-    df['Weekday'] = df['Date'].dt.weekday.astype("Int64")
-    df['WeekOfYear'] = df['Date'].dt.isocalendar().week.astype("Int64")
-    df['DayOfYear'] = df['Date'].dt.dayofyear.astype("Int64")
+    df["Year"] = df["Date"].dt.year
+    df["Month"] = df["Date"].dt.month
+    df["Day"] = df["Date"].dt.day
+    df["Weekday"] = df["Date"].dt.weekday
+    df["WeekOfYear"] = df["Date"].dt.isocalendar().week.astype(int)
+    df["DayOfYear"] = df["Date"].dt.dayofyear
 
-    # Cyclical features
-    df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
-    df['Month_cos'] = np.cos(2 * np.pi * df['Month'] / 12)
-    df['Weekday_sin'] = np.sin(2 * np.pi * df['Weekday'] / 7)
-    df['Weekday_cos'] = np.cos(2 * np.pi * df['Weekday'] / 7)
+    # Cyclical encoding
+    df["Month_sin"] = np.sin(2 * np.pi * df["Month"] / 12)
+    df["Month_cos"] = np.cos(2 * np.pi * df["Month"] / 12)
+    df["Weekday_sin"] = np.sin(2 * np.pi * df["Weekday"] / 7)
+    df["Weekday_cos"] = np.cos(2 * np.pi * df["Weekday"] / 7)
 
     # Period markers
-    df['Is_Month_Start'] = df['Date'].dt.is_month_start.astype(int)
-    df['Is_Month_End'] = df['Date'].dt.is_month_end.astype(int)
-    df['Is_Quarter_Start'] = df['Date'].dt.is_quarter_start.astype(int)
-    df['Is_Quarter_End'] = df['Date'].dt.is_quarter_end.astype(int)
-    df['Is_Year_Start'] = df['Date'].dt.is_year_start.astype(int)
-    df['Is_Year_End'] = df['Date'].dt.is_year_end.astype(int)
+    df["Is_Month_Start"] = df["Date"].dt.is_month_start.astype(int)
+    df["Is_Month_End"] = df["Date"].dt.is_month_end.astype(int)
+    df["Is_Quarter_Start"] = df["Date"].dt.is_quarter_start.astype(int)
+    df["Is_Quarter_End"] = df["Date"].dt.is_quarter_end.astype(int)
+    df["Is_Year_Start"] = df["Date"].dt.is_year_start.astype(int)
+    df["Is_Year_End"] = df["Date"].dt.is_year_end.astype(int)
 
-    # -------------------------
-    # Lag & rolling features
-    # -------------------------
+    # Lag & rolling features (require "Weekly_Sales")
     lag_cols = ["lag_1","lag_2","lag_3","lag_7"]
     roll_cols = ["rolling_mean_3","rolling_mean_7","rolling_mean_14","rolling_mean_28","rolling_std_7"]
 
@@ -145,11 +113,11 @@ def run_prediction(df: pd.DataFrame):
         if col in df.columns:
             df[col] = encoder.transform(df[col].astype(str).fillna("Unknown"))
 
-    # Apply scaler if exists
+    # Apply scaler
     if scaler:
         df[df.columns] = scaler.transform(df[df.columns])
 
-    # Ensure all model features exist
+    # Ensure all expected features exist
     expected_features = model.get_booster().feature_names
     for col in expected_features:
         if col not in df.columns:
@@ -167,11 +135,11 @@ def run_prediction(df: pd.DataFrame):
             "mse": float(mean_squared_error(y_true, preds)),
             "rmse": float(np.sqrt(mean_squared_error(y_true, preds))),
             "r2": float(r2_score(y_true, preds)),
-            "mape": float(np.mean(np.abs((y_true - preds)/y_true)) * 100),
+            "mape": float(mean_absolute_percentage_error(y_true, preds) * 100),
         }
 
-    # Prepare output with actual and predicted
-    output_df = df.copy()
+    # Prepare output with actual and predicted sales
+    output_df = df[["Date"]].copy()
     output_df["Actual_Weekly_Sales"] = df["Weekly_Sales"] if "Weekly_Sales" in df.columns else None
     output_df["Predicted_Weekly_Sales"] = preds
 
